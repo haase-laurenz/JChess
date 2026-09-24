@@ -14,7 +14,7 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * JChessV1 - Intelligente Schach-Engine für JChess, basierend auf der JS_ONE Engine-Architektur.
+ * JChessV2 - Intelligente Schach-Engine für JChess, basierend auf der JS_ONE Engine-Architektur.
  *
  * Enthaltene Schlüsselkonzepte aus JS_ONE:
  * 1. Iterative Deepening: Beginnend bei Tiefe 1 schrittweise Vertiefung bis maxDepth oder Zeitablauf.
@@ -31,9 +31,9 @@ import java.util.List;
  *    - Umwandlungen und Rochaden bevorzugt vor stillen Zügen.
  * 6. Dynamisches Zeitmanagement: Unterstützt Schachuhr (ChessClock) und feste Suchtiefen.
  *
- * Ort: /engine/bots/JChessV1.java
+ * Ort: /engine/bots/JChessV2.java
  */
-public class JChessV1 implements ChessEngine {
+public class JChessV2 implements ChessEngine {
 
     // --- Piece-Square Tables aus JS_ONE (aus Sicht von Weiß von Rang 1 bis 8, Index = rank * 8 + file) ---
 
@@ -226,54 +226,54 @@ public class JChessV1 implements ChessEngine {
     }
 
     /**
-     * Erstellt JChessV1 mit Standardeinstellungen (5s Bedenkzeit / 5% Restzeit mit Iterative Deepening).
+     * Erstellt JChessV2 mit Standardeinstellungen (5s Bedenkzeit / 5% Restzeit mit Iterative Deepening).
      */
-    public JChessV1() {
-        this("JChessV1", 64, false, 5000, 0.05);
+    public JChessV2() {
+        this("JChessV2", 64, false, 5000, 0.05);
     }
 
     /**
-     * Erstellt JChessV1 mit einem individuellen Denkfenster in Millisekunden (z.B. 5000 für 5s).
+     * Erstellt JChessV2 mit einem individuellen Denkfenster in Millisekunden (z.B. 5000 für 5s).
      */
-    public JChessV1(long defaultTimeLimitMs) {
-        this("JChessV1 (" + (defaultTimeLimitMs / 1000) + "s)", 64, false, defaultTimeLimitMs, 0.05);
+    public JChessV2(long defaultTimeLimitMs) {
+        this("JChessV2 (" + (defaultTimeLimitMs / 1000) + "s)", 64, false, defaultTimeLimitMs, 0.05);
     }
 
-    public JChessV1(double remainingTimePercentage) {
-        this("JChessV1 (" + Math.round(remainingTimePercentage * 100) + "%)", 64, false, 5000, remainingTimePercentage);
+    public JChessV2(double remainingTimePercentage) {
+        this("JChessV2 (" + Math.round(remainingTimePercentage * 100) + "%)", 64, false, 5000, remainingTimePercentage);
     }
 
-    public JChessV1(long defaultTimeLimitMs, double remainingTimePercentage) {
-        this("JChessV1", 64, false, defaultTimeLimitMs, remainingTimePercentage);
+    public JChessV2(long defaultTimeLimitMs, double remainingTimePercentage) {
+        this("JChessV2", 64, false, defaultTimeLimitMs, remainingTimePercentage);
     }
 
-    public JChessV1(String name, long defaultTimeLimitMs, double remainingTimePercentage) {
+    public JChessV2(String name, long defaultTimeLimitMs, double remainingTimePercentage) {
         this(name, 64, false, defaultTimeLimitMs, remainingTimePercentage);
     }
 
     /**
-     * Erstellt JChessV1 mit einer festen maximalen Suchtiefe (z.B. 3 oder 4).
+     * Erstellt JChessV2 mit einer festen maximalen Suchtiefe (z.B. 3 oder 4).
      */
-    public JChessV1(int searchDepth) {
-        this("JChessV1", searchDepth, true, 5000, 0.05);
+    public JChessV2(int searchDepth) {
+        this("JChessV2", searchDepth, true, 5000, 0.05);
     }
 
     /**
-     * Erstellt JChessV1 mit individuellem Namen und Suchtiefe.
+     * Erstellt JChessV2 mit individuellem Namen und Suchtiefe.
      */
-    public JChessV1(String name, int searchDepth) {
+    public JChessV2(String name, int searchDepth) {
         this(name, searchDepth, true, 5000, 0.05);
     }
 
-    public JChessV1(String name, int searchDepth, boolean useFixedDepth) {
+    public JChessV2(String name, int searchDepth, boolean useFixedDepth) {
         this(name, searchDepth, useFixedDepth, 5000, 0.05);
     }
 
-    public JChessV1(String name, int searchDepth, boolean useFixedDepth, long defaultTimeLimitMs) {
+    public JChessV2(String name, int searchDepth, boolean useFixedDepth, long defaultTimeLimitMs) {
         this(name, searchDepth, useFixedDepth, defaultTimeLimitMs, 0.05);
     }
 
-    public JChessV1(String name, int searchDepth, boolean useFixedDepth, long defaultTimeLimitMs, double remainingTimePercentage) {
+    public JChessV2(String name, int searchDepth, boolean useFixedDepth, long defaultTimeLimitMs, double remainingTimePercentage) {
         this.name = name;
         this.searchDepth = Math.max(1, searchDepth);
         this.useFixedDepth = useFixedDepth;
@@ -529,7 +529,7 @@ public class JChessV1 implements ChessEngine {
 
         // Regelmäßige Timeout- & Abbruchprüfung alle 2048 Knoten zur Vermeidung von Systemaufruf-Overhead
         if (stopRequested || Thread.currentThread().isInterrupted() ||
-                ((lastNodesEvaluated & 2047) == 0 && System.currentTimeMillis() >= deadline)) {
+                (java.util.concurrent.ThreadLocalRandom.current().nextInt(1024) == 0 && System.currentTimeMillis() >= deadline)) {
             timeExceeded = true;
             return 0.0;
         }
@@ -701,7 +701,7 @@ public class JChessV1 implements ChessEngine {
         lastNodesEvaluated++;
 
         if (stopRequested || timeExceeded || Thread.currentThread().isInterrupted() ||
-                ((lastNodesEvaluated & 2047) == 0 && System.currentTimeMillis() >= deadline)) {
+                (java.util.concurrent.ThreadLocalRandom.current().nextInt(1024) == 0 && System.currentTimeMillis() >= deadline)) {
             timeExceeded = true;
             return 0.0;
         }
@@ -812,8 +812,35 @@ public class JChessV1 implements ChessEngine {
             if (color == PieceColor.WHITE) {
                 score += baseVal;
                 score += getPieceSquareScore(type, i, factor);
-                if (type == PieceType.BISHOP) whiteBishops++;
-                else if (type == PieceType.PAWN) {
+                
+                if (type == PieceType.BISHOP) {
+                    whiteBishops++;
+                    // Outpost Bonus
+                    if (rank >= 3 && rank <= 5 && (whitePawnsBitboard & PAWN_SUPPORT_MASK[PieceColor.WHITE.ordinal()][i]) != 0L && (blackPawnsBitboard & PASSED_PAWN_MASK[PieceColor.WHITE.ordinal()][i]) == 0L) {
+                        score += 15;
+                    }
+                } else if (type == PieceType.KNIGHT) {
+                    // Outpost Bonus
+                    if (rank >= 3 && rank <= 5 && (whitePawnsBitboard & PAWN_SUPPORT_MASK[PieceColor.WHITE.ordinal()][i]) != 0L && (blackPawnsBitboard & PASSED_PAWN_MASK[PieceColor.WHITE.ordinal()][i]) == 0L) {
+                        score += 15;
+                    }
+                } else if (type == PieceType.ROOK) {
+                    // Rook on 7th rank
+                    if (rank == 6) score += 20;
+                } else if (type == PieceType.KING) {
+                    // King Safety (Pawn Shield in Middlegame)
+                    if (factor < 0.5) { // Nur im Mittelspiel
+                        if (file >= 5) { // Kingside (f, g, h)
+                            if ((whitePawnsBitboard & (1L << 13)) != 0) score += 10; // f2
+                            if ((whitePawnsBitboard & (1L << 14)) != 0) score += 10; // g2
+                            if ((whitePawnsBitboard & (1L << 15)) != 0) score += 10; // h2
+                        } else if (file <= 2) { // Queenside (a, b, c)
+                            if ((whitePawnsBitboard & (1L << 8)) != 0) score += 10; // a2
+                            if ((whitePawnsBitboard & (1L << 9)) != 0) score += 10; // b2
+                            if ((whitePawnsBitboard & (1L << 10)) != 0) score += 10; // c2
+                        }
+                    }
+                } else if (type == PieceType.PAWN) {
                     whitePawnsOnFile[file]++;
                     
                     // Freibauer (Passed Pawn)
@@ -825,13 +852,45 @@ public class JChessV1 implements ChessEngine {
                     if ((whitePawnsBitboard & PAWN_SUPPORT_MASK[PieceColor.WHITE.ordinal()][i]) != 0L) {
                         score += 10;
                     }
+                    
+                    // Backward Pawn (Keine eigenen Bauern dahinter oder daneben)
+                    if ((whitePawnsBitboard & PASSED_PAWN_MASK[PieceColor.BLACK.ordinal()][i]) == 0L) {
+                        score -= 5;
+                    }
                 }
             } else {
                 int flippedIndex = file + (7 - rank) * 8;
                 score -= baseVal;
                 score -= getPieceSquareScore(type, flippedIndex, factor);
-                if (type == PieceType.BISHOP) blackBishops++;
-                else if (type == PieceType.PAWN) {
+                
+                if (type == PieceType.BISHOP) {
+                    blackBishops++;
+                    // Outpost Bonus
+                    if (rank >= 2 && rank <= 4 && (blackPawnsBitboard & PAWN_SUPPORT_MASK[PieceColor.BLACK.ordinal()][i]) != 0L && (whitePawnsBitboard & PASSED_PAWN_MASK[PieceColor.BLACK.ordinal()][i]) == 0L) {
+                        score -= 15;
+                    }
+                } else if (type == PieceType.KNIGHT) {
+                    // Outpost Bonus
+                    if (rank >= 2 && rank <= 4 && (blackPawnsBitboard & PAWN_SUPPORT_MASK[PieceColor.BLACK.ordinal()][i]) != 0L && (whitePawnsBitboard & PASSED_PAWN_MASK[PieceColor.BLACK.ordinal()][i]) == 0L) {
+                        score -= 15;
+                    }
+                } else if (type == PieceType.ROOK) {
+                    // Rook on 7th rank (Black's 2nd rank = index 1)
+                    if (rank == 1) score -= 20;
+                } else if (type == PieceType.KING) {
+                    // King Safety (Pawn Shield in Middlegame)
+                    if (factor < 0.5) { // Nur im Mittelspiel
+                        if (file >= 5) { // Kingside
+                            if ((blackPawnsBitboard & (1L << 53)) != 0) score -= 10; // f7
+                            if ((blackPawnsBitboard & (1L << 54)) != 0) score -= 10; // g7
+                            if ((blackPawnsBitboard & (1L << 55)) != 0) score -= 10; // h7
+                        } else if (file <= 2) { // Queenside
+                            if ((blackPawnsBitboard & (1L << 48)) != 0) score -= 10; // a7
+                            if ((blackPawnsBitboard & (1L << 49)) != 0) score -= 10; // b7
+                            if ((blackPawnsBitboard & (1L << 50)) != 0) score -= 10; // c7
+                        }
+                    }
+                } else if (type == PieceType.PAWN) {
                     blackPawnsOnFile[file]++;
                     
                     // Freibauer (Passed Pawn)
@@ -842,6 +901,11 @@ public class JChessV1 implements ChessEngine {
                     // Gedeckter Bauer (Pawn Chain)
                     if ((blackPawnsBitboard & PAWN_SUPPORT_MASK[PieceColor.BLACK.ordinal()][i]) != 0L) {
                         score -= 10;
+                    }
+                    
+                    // Backward Pawn (Keine eigenen Bauern dahinter oder daneben)
+                    if ((blackPawnsBitboard & PASSED_PAWN_MASK[PieceColor.WHITE.ordinal()][i]) == 0L) {
+                        score += 5;
                     }
                 }
             }

@@ -41,6 +41,7 @@ public class SidebarPanel extends JPanel {
     }
 
     public enum BotType {
+        JCHESS_V2("JChessV2 (Advanced Eval)", () -> new engine.bots.JChessV2("JChessV2 (Advanced)", 5000L, 0.05)),
         JCHESS_V1(            "JChessV1 (5% Restzeit / 5s)",     () -> new engine.bots.JChessV1("JChessV1 (5%)", 5000L, 0.05)),
         JCHESS_V1_FAST(       "JChessV1 (2.5% Restzeit / 1s)",   () -> new engine.bots.JChessV1("JChessV1 (2.5%)", 1000L, 0.025)),
         JCHESS_V1_DEEP(       "JChessV1 (10% Restzeit / 10s)",   () -> new engine.bots.JChessV1("JChessV1 (10%)", 10000L, 0.10)),
@@ -210,12 +211,12 @@ public class SidebarPanel extends JPanel {
         botWhiteComboBox = new JComboBox<>(BotType.values());
         botWhiteComboBox.setAlignmentX(Component.LEFT_ALIGNMENT);
         botWhiteComboBox.setMaximumSize(new Dimension(Integer.MAX_VALUE, 28));
-        botWhiteComboBox.setSelectedItem(BotType.JCHESS_V1);
+        botWhiteComboBox.setSelectedItem(BotType.JCHESS_V2);
 
         botBlackComboBox = new JComboBox<>(BotType.values());
         botBlackComboBox.setAlignmentX(Component.LEFT_ALIGNMENT);
         botBlackComboBox.setMaximumSize(new Dimension(Integer.MAX_VALUE, 28));
-        botBlackComboBox.setSelectedItem(BotType.JCHESS_V1);
+        botBlackComboBox.setSelectedItem(BotType.JCHESS_V2);
 
         // Zeit & Inkrement aus GameConfig initialisieren
         com.jchess.core.config.GameConfig cfg = com.jchess.core.config.GameConfig.getInstance();

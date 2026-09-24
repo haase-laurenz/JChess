@@ -34,5 +34,5 @@ if ($LASTEXITCODE -ne 0) {
 Write-Host "Kompilierung erfolgreich!" -ForegroundColor Green
 Write-Host "Starte JChess GUI..." -ForegroundColor Cyan
 
-# 3. Programm starten
-& java -cp "$outDir;." com.jchess.Main
+# 3. Programm mit optimierten JVM-Argumenten starten
+& java -server -Xms2G -Xmx4G -XX:+UseZGC -XX:+UnlockExperimentalVMOptions -cp "$outDir;." com.jchess.Main

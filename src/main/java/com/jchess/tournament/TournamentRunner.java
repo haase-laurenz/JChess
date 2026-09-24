@@ -25,11 +25,9 @@ public class TournamentRunner {
         Tournament tournament = new Tournament("JChess Herbstmeisterschaft 2026", config);
 
         // 2. Teilnehmer hinzufügen
-        tournament.addParticipant(new Random("Random Bot"));
-        tournament.addParticipant(new JChessV1("JChessV1 (10%)", 64, false, 1000, 0.10));
-        tournament.addParticipant(new JChessV1("JChessV1 (2.5%)", 64, false, 1000, 0.025));
+        tournament.addParticipant(new engine.bots.JChessV2("JChessV2 (Advanced Eval)", 64, false, 1000, 0.05));
         tournament.addParticipant(new JChessV1("JChessV1 (5%)", 64, false, 1000, 0.05));
-        tournament.addParticipant(new KingLBot1("KingLBot1 (Original)", 64, false, 1000, 0.05));
+        tournament.addParticipant(new KingLBot1("KingLBot", 64, false, 1000, 0.05));
 
         // 3. Turnier starten
         tournament.run();
