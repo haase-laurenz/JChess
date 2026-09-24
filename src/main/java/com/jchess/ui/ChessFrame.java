@@ -45,7 +45,7 @@ public class ChessFrame extends JFrame {
         t.setDaemon(true);
         return t;
     });
-    private engine.bots.JChessV2 backgroundEvalBot;
+    private engine.bots.JChessV3 backgroundEvalBot;
     private Future<?> currentEvalTask;
 
     public ChessFrame() {
@@ -596,7 +596,7 @@ public class ChessFrame extends JFrame {
         boardPanel.clearBestMove();
 
         // 2. Sofortige statische Heuristik anzeigen
-        engine.bots.JChessV2 staticEvalBot = new engine.bots.JChessV2(1);
+        engine.bots.JChessV3 staticEvalBot = new engine.bots.JChessV3(1);
         double immediateScore = staticEvalBot.evaluate(board, PieceColor.WHITE);
         GameStatus status = MoveGenerator.evaluateGameStatus(board);
         evalBarPanel.setEvaluation(immediateScore, status);
@@ -611,8 +611,8 @@ public class ChessFrame extends JFrame {
         Board analysisBoard = board.copy();
         PieceColor activeColor = analysisBoard.getActivePlayer();
 
-        // 4. JChessV2 mit TimeLimit 1_000_000 ms (~16,6 Minuten) und max. Tiefe 64
-        engine.bots.JChessV2 analyzer = new engine.bots.JChessV2("EvalBar", 64, false, 1_000_000L, 0.05);
+        // 4. JChessV3 mit TimeLimit 1_000_000 ms (~16,6 Minuten) und max. Tiefe 64
+        engine.bots.JChessV3 analyzer = new engine.bots.JChessV3("EvalBar", 64, false, 1_000_000L, 0.05);
         this.backgroundEvalBot = analyzer;
 
         currentEvalTask = evalExecutor.submit(() -> {

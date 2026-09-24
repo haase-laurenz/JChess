@@ -37,12 +37,14 @@ public class TranspositionTable {
     private long hits = 0;
     private long misses = 0;
 
+    private final TTEntry probeResult = new TTEntry(0L, 0.0, 0, (byte)0, null);
+
     public static class TTEntry {
-        public final long key;
-        public final double score;
-        public final int depth;
-        public final byte flag;
-        public final Move bestMove;
+        public long key;
+        public double score;
+        public int depth;
+        public byte flag;
+        public Move bestMove;
 
         public TTEntry(long key, double score, int depth, byte flag, Move bestMove) {
             this.key = key;
@@ -94,7 +96,12 @@ public class TranspositionTable {
             } else if (score <= -MATE_THRESHOLD) {
                 score += ply;
             }
-            return new TTEntry(key, score, depths[idx], flags[idx], bestMoves[idx]);
+            probeResult.key = key;
+            probeResult.score = score;
+            probeResult.depth = depths[idx];
+            probeResult.flag = flags[idx];
+            probeResult.bestMove = bestMoves[idx];
+            return probeResult;
         }
         misses++;
         return null;

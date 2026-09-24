@@ -29,4 +29,4 @@ if ($LASTEXITCODE -ne 0) {
 Write-Host "Kompilierung erfolgreich! Starte Turnier..." -ForegroundColor Green
 
 # 3. Turnier mit optimierten JVM-Argumenten starten
-& java -server -Xms2G -Xmx4G -XX:+UseZGC -XX:+UnlockExperimentalVMOptions -cp "$outDir;." com.jchess.tournament.TournamentRunner
+& java -server -Xms512M -Xmx2G -XX:+UseG1GC -cp "$outDir;." com.jchess.tournament.TournamentRunner
