@@ -1,0 +1,101 @@
+﻿[
+    {
+        "ply":  0,
+        "nodes":  1,
+        "unique":  1,
+        "captures":  0,
+        "enpassants":  0,
+        "castles":  0,
+        "promotions":  0,
+        "checks":  0,
+        "mates":  0
+    },
+    {
+        "ply":  1,
+        "nodes":  20,
+        "unique":  20,
+        "captures":  0,
+        "enpassants":  0,
+        "castles":  0,
+        "promotions":  0,
+        "checks":  0,
+        "mates":  0
+    },
+    {
+        "ply":  2,
+        "nodes":  400,
+        "unique":  400,
+        "captures":  0,
+        "enpassants":  0,
+        "castles":  0,
+        "promotions":  0,
+        "checks":  0,
+        "mates":  0
+    },
+    {
+        "ply":  3,
+        "nodes":  8902,
+        "unique":  5362,
+        "captures":  34,
+        "enpassants":  0,
+        "castles":  0,
+        "promotions":  0,
+        "checks":  12,
+        "mates":  0
+    },
+    {
+        "ply":  4,
+        "nodes":  197281,
+        "unique":  72078,
+        "captures":  1576,
+        "enpassants":  0,
+        "castles":  0,
+        "promotions":  0,
+        "checks":  461,
+        "mates":  8
+    },
+    {
+        "ply":  5,
+        "nodes":  4865609,
+        "unique":  822518,
+        "captures":  82719,
+        "enpassants":  258,
+        "castles":  0,
+        "promotions":  0,
+        "checks":  27004,
+        "mates":  347
+    },
+    {
+        "ply":  6,
+        "nodes":  119060324,
+        "unique":  9417681,
+        "captures":  2812008,
+        "enpassants":  5248,
+        "castles":  0,
+        "promotions":  0,
+        "checks":  798271,
+        "mates":  10828
+    },
+    {
+        "ply":  7,
+        "nodes":  3195901860,
+        "unique":  96400068,
+        "captures":  108329926,
+        "enpassants":  319617,
+        "castles":  883453,
+        "promotions":  0,
+        "checks":  32668081,
+        "mates":  435767
+    },
+    {
+        "ply":  8,
+        "nodes":  84998978956,
+        "unique":  988187354,
+        "captures":  3523740106,
+        "enpassants":  7187977,
+        "castles":  23605205,
+        "promotions":  0,
+        "checks":  959129557,
+        "mates":  9852036
+    }
+]
