@@ -417,18 +417,31 @@ public class JChessV3 implements ChessEngine {
         short bestMove = 0;
         double maxScore = -MATE_SCORE;
 
+        boolean isPvNode = (beta - alpha > 1.0);
         boolean fPrune = false;
-        if (effectiveDepth <= 2 && !inCheck && alpha > -MATE_SCORE + 100 && beta < MATE_SCORE - 100) {
+        
+        if (!inCheck && !isPvNode && Math.abs(alpha) < MATE_SCORE - 100 && Math.abs(beta) < MATE_SCORE - 100) {
             double staticEval = evaluate(board, color);
-            if (staticEval + effectiveDepth * 200 <= alpha) fPrune = true;
+            // Reverse Futility Pruning (Static Null Move Pruning)
+            if (effectiveDepth <= 4) {
+                double rfpMargin = effectiveDepth * 120.0;
+                if (staticEval - rfpMargin >= beta) {
+                    return staticEval;
+                }
+            }
+            // Futility Pruning
+            if (effectiveDepth <= 4) {
+                double futilityMargin = 100.0 + effectiveDepth * 150.0;
+                if (staticEval + futilityMargin <= alpha) {
+                    fPrune = true;
+                }
+            }
         }
 
         short[] searchedQuiets = plyQuiets[safePly];
         int quietsSearched = 0;
         int legalMovesSearched = 0;
         int[] scores = plyScores[safePly];
-
-        boolean isPvNode = (beta - alpha > 1.0);
 
         for (int i=0; i<count; i++) {
             // Pick-best: select highest scored move from index i to count-1
@@ -452,7 +465,7 @@ public class JChessV3 implements ChessEngine {
             int fromSq = CompactMove.getStartSquare(move);
             int toSq = CompactMove.getTargetSquare(move);
             int moveFlag = CompactMove.getMoveFlag(move);
-            boolean isCapture = (board.getPieceAtIndex(toSq) != null) || (moveFlag == CompactMove.EnPassantCaptureFlag);
+            boolean isCapture = (board.getPieceCodeAtIndex(toSq) != Board.EMPTY_SQUARE) || (moveFlag == CompactMove.EnPassantCaptureFlag);
             boolean isPromotion = (moveFlag >= CompactMove.PromoteToQueenFlag);
 
             board.makeMove(move);
