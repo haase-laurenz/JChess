@@ -103,6 +103,8 @@ public class JChessV3 implements ChessEngine {
     };
 
     private static final double MATE_SCORE = 30000.0;
+    
+    private static final int[] PIECE_VALUES = { 100, 320, 330, 500, 900, 20000 };
 
     private static final long[][] PASSED_PAWN_MASK = new long[2][64];
     private static final long[][] PAWN_SUPPORT_MASK = new long[2][64];
@@ -599,7 +601,7 @@ public class JChessV3 implements ChessEngine {
         for (int i=0; i<count; i++) {
             short m = moves[i];
             int moveFlag = CompactMove.getMoveFlag(m);
-            boolean isCapture = board.getPieceAtIndex(CompactMove.getTargetSquare(m)) != null || moveFlag == CompactMove.EnPassantCaptureFlag;
+            boolean isCapture = board.getPieceCodeAtIndex(CompactMove.getTargetSquare(m)) != Board.EMPTY_SQUARE || moveFlag == CompactMove.EnPassantCaptureFlag;
             boolean isPromotion = moveFlag >= CompactMove.PromoteToQueenFlag;
             
             if (isCapture || isPromotion) {
@@ -658,17 +660,21 @@ public class JChessV3 implements ChessEngine {
             int score = 0;
             int fromSq = CompactMove.getStartSquare(m);
             int toSq = CompactMove.getTargetSquare(m);
-            Piece target = board.getPieceAtIndex(toSq);
-            if (target != null) {
-                score += 1000000 + target.getType().getBaseValue() * 10 - board.getPieceAtIndex(fromSq).getType().getBaseValue();
+            byte target = board.getPieceCodeAtIndex(toSq);
+            byte moved = board.getPieceCodeAtIndex(fromSq);
+            int movedVal = PIECE_VALUES[moved % 6];
+            
+            if (target != Board.EMPTY_SQUARE) {
+                int targetVal = PIECE_VALUES[target % 6];
+                score += 1000000 + targetVal * 10 - movedVal;
             } else if (CompactMove.getMoveFlag(m) == CompactMove.EnPassantCaptureFlag) {
-                score += 1000000 + 1000 - board.getPieceAtIndex(fromSq).getType().getBaseValue();
+                score += 1000000 + 1000 - movedVal;
             }
             if (CompactMove.getMoveFlag(m) >= CompactMove.PromoteToQueenFlag) {
                 PieceType promo = CompactMove.getPromotionPieceType(m);
-                score += 900000 + (promo != null ? promo.getBaseValue() : 0);
+                score += 900000 + (promo != null ? PIECE_VALUES[promo.ordinal()] : 0);
             }
-            if (target == null && !(CompactMove.getMoveFlag(m) >= CompactMove.PromoteToQueenFlag)) {
+            if (target == Board.EMPTY_SQUARE && !(CompactMove.getMoveFlag(m) >= CompactMove.PromoteToQueenFlag)) {
                 if (ply < killerMoves.length) {
                     if (m == killerMoves[ply][0]) score += 90000;
                     else if (m == killerMoves[ply][1]) score += 80000;

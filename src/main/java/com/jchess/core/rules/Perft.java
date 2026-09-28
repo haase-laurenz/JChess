@@ -1,10 +1,8 @@
 package com.jchess.core.rules;
 
 import com.jchess.core.board.Board;
-import com.jchess.core.board.Move;
 import com.jchess.core.piece.PieceColor;
-
-import java.util.List;
+import engine.bots.CompactMove;
 
 /**
  * Performance Testing (Perft) für die Schach-Engine.
@@ -12,9 +10,7 @@ import java.util.List;
  * um die Korrektheit des MoveGenerators (Rochade, En Passant, Promotions, Schach, Matt)
  * sowie die Zuggüte und Performance (Nodes pro Sekunde) exakt zu verifizieren.
  *
- * Optimiert mit Pseudo-Legal-Traversierung: Die Legalitätsprüfung (König nicht im Schach)
- * erfolgt direkt im Perft-Loop nach makeMove, nicht vorab durch generateLegalMoves.
- * Dadurch wird jeder Zug nur einmal gemacht/rückgängig gemacht statt zweimal.
+ * Optimiert mit Zero-Allocation CompactMoves (16-bit) und Pseudo-Legal-Traversierung.
  */
 public final class Perft {
 
@@ -59,9 +55,7 @@ public final class Perft {
     }
 
     /**
-     * Kernalgorithmus: Traversiert mit Pseudo-Legal-Zügen.
-     * Legalitätsprüfung erfolgt direkt nach makeMove — jeder Zug wird nur 1x gemacht/rückgängig
-     * gemacht statt 2x (einmal für Legalitätsfilter + einmal für Rekursion).
+     * Kernalgorithmus: Traversiert mit Zero-Allocation CompactMoves (short-Arrays).
      */
     private static Result perftRecursive(Board board, int depth) {
         if (depth == 0) {
@@ -72,13 +66,22 @@ public final class Perft {
 
         Result total = new Result();
         PieceColor sideToMove = board.getActivePlayer();
-        // Pseudo-legale Züge erzeugen (ohne Legalitätsfilter — kein internes make/undo)
-        List<Move> pseudoMoves = MoveGenerator.generatePseudoLegalMoves(board, sideToMove);
+        
+        short[] pseudoMoves = new short[256];
+        int numMoves = MoveGenerator.generatePseudoLegalCompactMoves(board, sideToMove, pseudoMoves, 0);
 
         if (depth == 1) {
             // Depth-1 Bulk-Counting mit integrierter Legalitätsprüfung
-            for (int i = 0, size = pseudoMoves.size(); i < size; i++) {
-                Move move = pseudoMoves.get(i);
+            for (int i = 0; i < numMoves; i++) {
+                short move = pseudoMoves[i];
+                int flag = CompactMove.getMoveFlag(move);
+                int targetSq = CompactMove.getTargetSquare(move);
+                
+                boolean isEnPassant = (flag == CompactMove.EnPassantCaptureFlag);
+                boolean isCastle = (flag == CompactMove.CastleFlag);
+                boolean isPromotion = (flag >= CompactMove.PromoteToQueenFlag);
+                boolean isCapture = isEnPassant || (board.getPieceAtIndex(targetSq) != null);
+
                 board.makeMove(move);
 
                 // Legalitätsprüfung: Steht unser eigener König im Schach?
@@ -90,23 +93,37 @@ public final class Perft {
                 // Legaler Zug — Metriken zählen
                 total.nodes++;
 
-                if (move.isCapture() || move.isEnPassant()) {
+                if (isCapture) {
                     total.captures++;
                 }
-                if (move.isEnPassant()) {
+                if (isEnPassant) {
                     total.enpassants++;
                 }
-                if (move.isCastle()) {
+                if (isCastle) {
                     total.castles++;
                 }
-                if (move.isPromotion()) {
+                if (isPromotion) {
                     total.promotions++;
                 }
 
                 // Check/Mate-Erkennung: Steht der GEGNER jetzt im Schach?
-                boolean opponentInCheck = MoveGenerator.isKingInCheck(board, board.getActivePlayer());
+                PieceColor opponent = board.getActivePlayer();
+                boolean opponentInCheck = MoveGenerator.isKingInCheck(board, opponent);
                 if (opponentInCheck) {
-                    if (!MoveGenerator.hasAnyLegalMove(board)) {
+                    short[] oppMoves = new short[256];
+                    int oppCount = MoveGenerator.generatePseudoLegalCompactMoves(board, opponent, oppMoves, 0);
+                    boolean hasLegalMove = false;
+                    for (int j = 0; j < oppCount; j++) {
+                        board.makeMove(oppMoves[j]);
+                        if (!MoveGenerator.isKingInCheck(board, opponent)) {
+                            hasLegalMove = true;
+                            board.undoMove();
+                            break;
+                        }
+                        board.undoMove();
+                    }
+
+                    if (!hasLegalMove) {
                         total.mates++;
                     } else {
                         total.checks++;
@@ -119,8 +136,8 @@ public final class Perft {
         }
 
         // Tiefe > 1: Pseudo-legal traversieren, Legalität inline prüfen
-        for (int i = 0, size = pseudoMoves.size(); i < size; i++) {
-            Move move = pseudoMoves.get(i);
+        for (int i = 0; i < numMoves; i++) {
+            short move = pseudoMoves[i];
             board.makeMove(move);
 
             // Legalitätsprüfung: Steht unser eigener König im Schach?
@@ -139,19 +156,20 @@ public final class Perft {
 
     /**
      * Schneller Perft (nur Leaf-Node Count) für maximale Geschwindigkeit.
-     * Verwendet ebenfalls Pseudo-Legal-Traversierung für Single-Make/Undo.
+     * Zero-Allocation mit CompactMoves.
      */
     public static long perftNodesOnly(Board board, int depth) {
         if (depth == 0) return 1;
 
         PieceColor sideToMove = board.getActivePlayer();
-        List<Move> pseudoMoves = MoveGenerator.generatePseudoLegalMoves(board, sideToMove);
+        short[] pseudoMoves = new short[256];
+        int numMoves = MoveGenerator.generatePseudoLegalCompactMoves(board, sideToMove, pseudoMoves, 0);
 
         if (depth == 1) {
             // Bulk-Count: Nur legale Züge zählen
             int count = 0;
-            for (int i = 0, size = pseudoMoves.size(); i < size; i++) {
-                Move move = pseudoMoves.get(i);
+            for (int i = 0; i < numMoves; i++) {
+                short move = pseudoMoves[i];
                 board.makeMove(move);
                 if (!MoveGenerator.isKingInCheck(board, sideToMove)) {
                     count++;
@@ -162,8 +180,8 @@ public final class Perft {
         }
 
         long nodes = 0;
-        for (int i = 0, size = pseudoMoves.size(); i < size; i++) {
-            Move move = pseudoMoves.get(i);
+        for (int i = 0; i < numMoves; i++) {
+            short move = pseudoMoves[i];
             board.makeMove(move);
             if (!MoveGenerator.isKingInCheck(board, sideToMove)) {
                 nodes += perftNodesOnly(board, depth - 1);

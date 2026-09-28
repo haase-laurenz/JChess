@@ -10,6 +10,7 @@ import com.jchess.core.piece.PieceType;
 
 import java.util.ArrayList;
 import java.util.List;
+import engine.bots.CompactMove;
 
 /**
  * Erzeugt pseudo-legale und voll legale Züge für das Schachspiel.
@@ -196,6 +197,85 @@ public final class MoveGenerator {
         return moves;
     }
 
+    /**
+     * Erzeugt alle pseudo-legalen Züge kompakt in das übergebene short-Array (Zero-Allocation).
+     * @return Die neue Anzahl der Züge (offset nach Einfügen).
+     */
+    public static int generatePseudoLegalCompactMoves(Board board, PieceColor color, short[] moves, int offset) {
+        long friendly = board.getColorBitboard(color);
+        long enemy = board.getColorBitboard(color.opposite());
+        long occupied = board.getOccupiedBitboard();
+
+        // 1. Bauernzüge
+        offset = generatePawnCompactMoves(board, color, enemy, occupied, moves, offset);
+
+        // 2. Springerzüge
+        long knights = board.getBitboard(PieceType.KNIGHT, color);
+        while (knights != 0) {
+            int fromSq = Long.numberOfTrailingZeros(knights);
+            long dests = BitboardHelper.getKnightAttacks(fromSq) & ~friendly;
+            while (dests != 0) {
+                int toSq = Long.numberOfTrailingZeros(dests);
+                moves[offset++] = CompactMove.createMove(fromSq, toSq, CompactMove.NoFlag);
+                dests &= dests - 1;
+            }
+            knights &= knights - 1;
+        }
+
+        // 3. Läuferzüge
+        long bishops = board.getBitboard(PieceType.BISHOP, color);
+        while (bishops != 0) {
+            int fromSq = Long.numberOfTrailingZeros(bishops);
+            long dests = BitboardHelper.getBishopAttacks(fromSq, occupied) & ~friendly;
+            while (dests != 0) {
+                int toSq = Long.numberOfTrailingZeros(dests);
+                moves[offset++] = CompactMove.createMove(fromSq, toSq, CompactMove.NoFlag);
+                dests &= dests - 1;
+            }
+            bishops &= bishops - 1;
+        }
+
+        // 4. Turmzüge
+        long rooks = board.getBitboard(PieceType.ROOK, color);
+        while (rooks != 0) {
+            int fromSq = Long.numberOfTrailingZeros(rooks);
+            long dests = BitboardHelper.getRookAttacks(fromSq, occupied) & ~friendly;
+            while (dests != 0) {
+                int toSq = Long.numberOfTrailingZeros(dests);
+                moves[offset++] = CompactMove.createMove(fromSq, toSq, CompactMove.NoFlag);
+                dests &= dests - 1;
+            }
+            rooks &= rooks - 1;
+        }
+
+        // 5. Damenzüge
+        long queens = board.getBitboard(PieceType.QUEEN, color);
+        while (queens != 0) {
+            int fromSq = Long.numberOfTrailingZeros(queens);
+            long dests = BitboardHelper.getQueenAttacks(fromSq, occupied) & ~friendly;
+            while (dests != 0) {
+                int toSq = Long.numberOfTrailingZeros(dests);
+                moves[offset++] = CompactMove.createMove(fromSq, toSq, CompactMove.NoFlag);
+                dests &= dests - 1;
+            }
+            queens &= queens - 1;
+        }
+
+        // 6. Königszüge & Rochade
+        int kingSq = board.getKingSquare(color);
+        if (kingSq >= 0) {
+            long dests = BitboardHelper.getKingAttacks(kingSq) & ~friendly;
+            while (dests != 0) {
+                int toSq = Long.numberOfTrailingZeros(dests);
+                moves[offset++] = CompactMove.createMove(kingSq, toSq, CompactMove.NoFlag);
+                dests &= dests - 1;
+            }
+            offset = generateCastlingCompactMoves(board, kingSq, color, moves, offset);
+        }
+
+        return offset;
+    }
+
     private static void generatePawnMoves(Board board, PieceColor color, long enemy, long occupied, List<Move> moves) {
         long pawns = board.getBitboard(PieceType.PAWN, color);
         int dir = color.getPawnDirection();
@@ -261,6 +341,62 @@ public final class MoveGenerator {
         }
     }
 
+    private static int generatePawnCompactMoves(Board board, PieceColor color, long enemy, long occupied, short[] moves, int offset) {
+        long pawns = board.getBitboard(PieceType.PAWN, color);
+        int dir = color.getPawnDirection();
+        int promoRank = color.getPromotionRank();
+        int startRank = color.getPawnStartRank();
+        Position epTarget = board.getEnPassantTarget();
+        int epSq = (epTarget != null) ? epTarget.getIndex() : -1;
+
+        while (pawns != 0) {
+            int fromSq = Long.numberOfTrailingZeros(pawns);
+            int rank = fromSq / 8;
+
+            int oneStepSq = fromSq + dir * 8;
+            if (oneStepSq >= 0 && oneStepSq < 64 && (occupied & (1L << oneStepSq)) == 0) {
+                int oneStepRank = oneStepSq / 8;
+                if (oneStepRank == promoRank) {
+                    moves[offset++] = CompactMove.createMove(fromSq, oneStepSq, CompactMove.PromoteToKnightFlag);
+                    moves[offset++] = CompactMove.createMove(fromSq, oneStepSq, CompactMove.PromoteToBishopFlag);
+                    moves[offset++] = CompactMove.createMove(fromSq, oneStepSq, CompactMove.PromoteToRookFlag);
+                    moves[offset++] = CompactMove.createMove(fromSq, oneStepSq, CompactMove.PromoteToQueenFlag);
+                } else {
+                    moves[offset++] = CompactMove.createMove(fromSq, oneStepSq, CompactMove.NoFlag);
+
+                    if (rank == startRank) {
+                        int twoStepSq = fromSq + 2 * dir * 8;
+                        if ((occupied & (1L << twoStepSq)) == 0) {
+                            moves[offset++] = CompactMove.createMove(fromSq, twoStepSq, CompactMove.PawnTwoUpFlag);
+                        }
+                    }
+                }
+            }
+
+            long attackDests = BitboardHelper.getPawnAttacks(fromSq, color) & enemy;
+            while (attackDests != 0) {
+                int toSq = Long.numberOfTrailingZeros(attackDests);
+                int toRank = toSq / 8;
+                if (toRank == promoRank) {
+                    moves[offset++] = CompactMove.createMove(fromSq, toSq, CompactMove.PromoteToKnightFlag);
+                    moves[offset++] = CompactMove.createMove(fromSq, toSq, CompactMove.PromoteToBishopFlag);
+                    moves[offset++] = CompactMove.createMove(fromSq, toSq, CompactMove.PromoteToRookFlag);
+                    moves[offset++] = CompactMove.createMove(fromSq, toSq, CompactMove.PromoteToQueenFlag);
+                } else {
+                    moves[offset++] = CompactMove.createMove(fromSq, toSq, CompactMove.NoFlag);
+                }
+                attackDests &= attackDests - 1;
+            }
+
+            if (epSq >= 0 && (BitboardHelper.getPawnAttacks(fromSq, color) & (1L << epSq)) != 0) {
+                moves[offset++] = CompactMove.createMove(fromSq, epSq, CompactMove.EnPassantCaptureFlag);
+            }
+
+            pawns &= pawns - 1;
+        }
+        return offset;
+    }
+
     private static void generateCastlingMoves(Board board, int kingSq, Piece king, List<Move> moves) {
         PieceColor color = king.getColor();
         PieceColor enemy = color.opposite();
@@ -308,6 +444,52 @@ public final class MoveGenerator {
                 }
             }
         }
+    }
+
+    private static int generateCastlingCompactMoves(Board board, int kingSq, PieceColor color, short[] moves, int offset) {
+        PieceColor enemy = color.opposite();
+        int rank = (color == PieceColor.WHITE) ? 0 : 7;
+        int expectedKingSq = rank * 8 + 4;
+
+        if (kingSq != expectedKingSq) {
+            return offset;
+        }
+
+        if (BitboardHelper.isSquareAttacked(board, kingSq, enemy)) {
+            return offset;
+        }
+
+        int rights = board.getCastlingRights();
+        long occupied = board.getOccupiedBitboard();
+
+        int ksMask = (color == PieceColor.WHITE) ? Board.CASTLE_WHITE_KINGSIDE : Board.CASTLE_BLACK_KINGSIDE;
+        if ((rights & ksMask) != 0) {
+            int fSq = rank * 8 + 5;
+            int gSq = rank * 8 + 6;
+            long betweenMask = (1L << fSq) | (1L << gSq);
+            if ((occupied & betweenMask) == 0) {
+                if (!BitboardHelper.isSquareAttacked(board, fSq, enemy) &&
+                    !BitboardHelper.isSquareAttacked(board, gSq, enemy)) {
+                    moves[offset++] = CompactMove.createMove(kingSq, gSq, CompactMove.CastleFlag);
+                }
+            }
+        }
+
+        int qsMask = (color == PieceColor.WHITE) ? Board.CASTLE_WHITE_QUEENSIDE : Board.CASTLE_BLACK_QUEENSIDE;
+        if ((rights & qsMask) != 0) {
+            int bSq = rank * 8 + 1;
+            int cSq = rank * 8 + 2;
+            int dSq = rank * 8 + 3;
+            long betweenMask = (1L << bSq) | (1L << cSq) | (1L << dSq);
+            if ((occupied & betweenMask) == 0) {
+                if (!BitboardHelper.isSquareAttacked(board, dSq, enemy) &&
+                    !BitboardHelper.isSquareAttacked(board, cSq, enemy)) {
+                    moves[offset++] = CompactMove.createMove(kingSq, cSq, CompactMove.CastleFlag);
+                }
+            }
+        }
+        
+        return offset;
     }
 
     /**

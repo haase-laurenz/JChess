@@ -245,16 +245,16 @@ public class Tournament {
         int gamesPerPairing = config.getGamesPerPairing();
         List<String> openings = config.getOpeningFens();
 
+        java.util.Random rand = new java.util.Random();
         for (int i = 0; i < participants.size(); i++) {
             for (int j = i + 1; j < participants.size(); j++) {
                 ChessEngine e1 = participants.get(i);
                 ChessEngine e2 = participants.get(j);
 
-                for (int round = 0; round < gamesPerPairing; round++) {
-                    String fen = openings.isEmpty() ? null : openings.get(round % openings.size());
-                    if (round % 2 == 0) {
-                        list.add(new Pairing(e1, e2, fen));
-                    } else {
+                for (int round = 0; round < gamesPerPairing; round += 2) {
+                    String fen = openings.isEmpty() ? null : openings.get(rand.nextInt(openings.size()));
+                    list.add(new Pairing(e1, e2, fen));
+                    if (round + 1 < gamesPerPairing) {
                         list.add(new Pairing(e2, e1, fen));
                     }
                 }

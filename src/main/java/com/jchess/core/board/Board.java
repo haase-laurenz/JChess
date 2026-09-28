@@ -24,7 +24,21 @@ public final class Board {
     public static final int CASTLE_BLACK_QUEENSIDE = 8;
     public static final int CASTLE_ALL = 15;
 
-    private final Piece[] squares = new Piece[64];
+    public static final byte EMPTY_SQUARE = -1;
+
+    public static byte getPieceCode(Piece piece) {
+        if (piece == null) return EMPTY_SQUARE;
+        return (byte) (piece.getColor().ordinal() * 6 + piece.getType().ordinal());
+    }
+
+    public static Piece pieceFromCode(byte code) {
+        if (code == EMPTY_SQUARE) return null;
+        PieceColor color = (code >= 6) ? PieceColor.BLACK : PieceColor.WHITE;
+        PieceType type = PieceType.values()[code % 6];
+        return Piece.of(type, color);
+    }
+
+    private final byte[] squares = new byte[64];
     private PieceColor activePlayer = PieceColor.WHITE;
     private int castlingRights = CASTLE_ALL;
     private Position enPassantTarget = null;
@@ -52,8 +66,8 @@ public final class Board {
 
     // Primitive History Arrays für zero-allocation makeMove(short)
     private short[] compactMoveHistory = new short[512];
-    private Piece[] capturedPieceHistory = new Piece[512];
-    private Piece[] movedPieceHistory = new Piece[512];
+    private byte[] capturedPieceHistory = new byte[512];
+    private byte[] movedPieceHistory = new byte[512];
     private int[] prevCastlingHistory = new int[512];
     private Position[] prevEnPassantHistory = new Position[512];
     private int[] prevHalfmoveHistory = new int[512];
@@ -89,7 +103,7 @@ public final class Board {
      * Löscht alle Figuren und setzt den Zustand zurück.
      */
     public void clear() {
-        Arrays.fill(squares, null);
+        Arrays.fill(squares, EMPTY_SQUARE);
         Arrays.fill(pieceBitboards, 0L);
         colorBitboards[0] = 0L;
         colorBitboards[1] = 0L;
@@ -160,40 +174,45 @@ public final class Board {
 
     public Piece getPieceAt(Position pos) {
         if (pos == null) return null;
-        return squares[pos.getIndex()];
+        return pieceFromCode(squares[pos.getIndex()]);
     }
 
     /**
      * Direkter Zugriff über Square-Index (0..63) ohne Position-Objekt.
-     * Für Performance-kritische Pfade (MoveGenerator, Perft).
      */
     public Piece getPieceAtIndex(int sq) {
+        return pieceFromCode(squares[sq]);
+    }
+
+    /**
+     * Direkter Zugriff auf den rohen Byte-Code der Figur ohne Objekt-Allokation.
+     */
+    public byte getPieceCodeAtIndex(int sq) {
         return squares[sq];
     }
 
     public Piece getPieceAt(int file, int rank) {
         if (!Position.isValid(file, rank)) return null;
-        return squares[rank * 8 + file];
+        return pieceFromCode(squares[rank * 8 + file]);
     }
 
     public void setPieceAt(Position pos, Piece piece) {
         if (pos == null) return;
         int sq = pos.getIndex();
-        Piece oldPiece = squares[sq];
-        if (oldPiece != null) {
-            int oldIdx = oldPiece.getColor().ordinal() * 6 + oldPiece.getType().ordinal();
+        byte oldCode = squares[sq];
+        if (oldCode != EMPTY_SQUARE) {
             long mask = ~(1L << sq);
-            pieceBitboards[oldIdx] &= mask;
-            colorBitboards[oldPiece.getColor().ordinal()] &= mask;
+            pieceBitboards[oldCode] &= mask;
+            colorBitboards[oldCode >= 6 ? 1 : 0] &= mask;
         }
 
-        squares[sq] = piece;
+        byte newCode = getPieceCode(piece);
+        squares[sq] = newCode;
 
-        if (piece != null) {
-            int newIdx = piece.getColor().ordinal() * 6 + piece.getType().ordinal();
+        if (newCode != EMPTY_SQUARE) {
             long mask = 1L << sq;
-            pieceBitboards[newIdx] |= mask;
-            colorBitboards[piece.getColor().ordinal()] |= mask;
+            pieceBitboards[newCode] |= mask;
+            colorBitboards[newCode >= 6 ? 1 : 0] |= mask;
             if (piece.getType() == PieceType.KING) {
                 if (piece.getColor() == PieceColor.WHITE) {
                     whiteKingPos = pos;
@@ -204,8 +223,8 @@ public final class Board {
                 }
             }
         } else {
-            if (oldPiece != null && oldPiece.getType() == PieceType.KING) {
-                if (oldPiece.getColor() == PieceColor.WHITE) {
+            if (oldCode != EMPTY_SQUARE && (oldCode % 6) == PieceType.KING.ordinal()) {
+                if (oldCode < 6) {
                     whiteKingPos = null;
                     whiteKingSquare = -1;
                 } else {
@@ -301,12 +320,12 @@ public final class Board {
         }
 
         // Figur von altem Feld entfernen
-        squares[fromSq] = null;
+        squares[fromSq] = EMPTY_SQUARE;
 
         // Spezialbehandlung: En Passant
         if (move.isEnPassant()) {
             int capSq = (fromSq / 8) * 8 + (toSq % 8);
-            squares[capSq] = null;
+            squares[capSq] = EMPTY_SQUARE;
             long capMask = 1L << capSq;
             int oppPawnIdx = oppColorIdx * 6 + PieceType.PAWN.ordinal();
             pieceBitboards[oppPawnIdx] ^= capMask;
@@ -325,8 +344,8 @@ public final class Board {
                 // Kurze Rochade (h-Turm von Spalte 7 auf Spalte 5)
                 int rFrom = rank * 8 + 7;
                 int rTo = rank * 8 + 5;
-                Piece rook = squares[rFrom];
-                squares[rFrom] = null;
+                byte rook = squares[rFrom];
+                squares[rFrom] = EMPTY_SQUARE;
                 squares[rTo] = rook;
                 long rookMoveMask = (1L << rFrom) | (1L << rTo);
                 pieceBitboards[rookIdx] ^= rookMoveMask;
@@ -338,8 +357,8 @@ public final class Board {
                 // Lange Rochade (a-Turm von Spalte 0 auf Spalte 3)
                 int rFrom = rank * 8 + 0;
                 int rTo = rank * 8 + 3;
-                Piece rook = squares[rFrom];
-                squares[rFrom] = null;
+                byte rook = squares[rFrom];
+                squares[rFrom] = EMPTY_SQUARE;
                 squares[rTo] = rook;
                 long rookMoveMask = (1L << rFrom) | (1L << rTo);
                 pieceBitboards[rookIdx] ^= rookMoveMask;
@@ -380,7 +399,7 @@ public final class Board {
 
             zobristKey ^= Zobrist.PIECE_SQUARE[movedPieceIdx][toSq];
         }
-        squares[toSq] = placedPiece;
+        squares[toSq] = getPieceCode(placedPiece);
 
         // Gesamtbelegung aktualisieren
         occupiedBitboard = colorBitboards[0] | colorBitboards[1];
@@ -450,11 +469,12 @@ public final class Board {
         int toSq = CompactMove.getTargetSquare(compactMove);
         int flag = CompactMove.getMoveFlag(compactMove);
 
-        Piece piece = squares[fromSq];
-        Piece captured = squares[toSq];
-        PieceColor color = piece.getColor();
-        int colorIdx = color.ordinal();
+        byte piece = squares[fromSq];
+        byte captured = squares[toSq];
+        int colorIdx = (piece >= 6) ? 1 : 0;
         int oppColorIdx = 1 - colorIdx;
+        PieceColor color = (colorIdx == 0) ? PieceColor.WHITE : PieceColor.BLACK;
+        int pieceTypeOrd = piece % 6;
 
         int oldCastlingRights = this.castlingRights;
         Position oldEnPassantTarget = this.enPassantTarget;
@@ -485,30 +505,29 @@ public final class Board {
         long toMask = 1L << toSq;
         long moveMask = fromMask | toMask;
 
-        int movedPieceIdx = Zobrist.getPieceIndex(piece.getType(), color);
-        zobristKey ^= Zobrist.PIECE_SQUARE[movedPieceIdx][fromSq];
+        zobristKey ^= Zobrist.PIECE_SQUARE[piece][fromSq];
 
-        boolean isCapture = (captured != null);
+        boolean isCapture = (captured != EMPTY_SQUARE);
         boolean isEnPassant = (flag == CompactMove.EnPassantCaptureFlag);
 
-        if (piece.getType() == PieceType.PAWN || isCapture || isEnPassant) {
+        if (pieceTypeOrd == PieceType.PAWN.ordinal() || isCapture || isEnPassant) {
             halfmoveClock = 0;
         } else {
             halfmoveClock++;
         }
 
-        squares[fromSq] = null;
+        squares[fromSq] = EMPTY_SQUARE;
 
         if (isEnPassant) {
             int capSq = (fromSq / 8) * 8 + (toSq % 8);
             captured = squares[capSq];
-            squares[capSq] = null;
+            squares[capSq] = EMPTY_SQUARE;
             long capMask = 1L << capSq;
             int oppPawnIdx = oppColorIdx * 6 + PieceType.PAWN.ordinal();
             pieceBitboards[oppPawnIdx] ^= capMask;
             colorBitboards[oppColorIdx] ^= capMask;
 
-            int oppZobristPawnIdx = Zobrist.getPieceIndex(PieceType.PAWN, color.opposite());
+            int oppZobristPawnIdx = oppColorIdx * 6 + PieceType.PAWN.ordinal();
             zobristKey ^= Zobrist.PIECE_SQUARE[oppZobristPawnIdx][capSq];
         }
 
@@ -517,67 +536,61 @@ public final class Board {
         if (flag == CompactMove.CastleFlag) {
             int rank = fromSq / 8;
             int rookIdx = colorIdx * 6 + PieceType.ROOK.ordinal();
-            int zobristRookIdx = Zobrist.getPieceIndex(PieceType.ROOK, color);
             if ((toSq % 8) == 6) {
                 int rFrom = rank * 8 + 7;
                 int rTo = rank * 8 + 5;
-                Piece rook = squares[rFrom];
-                squares[rFrom] = null;
+                byte rook = squares[rFrom];
+                squares[rFrom] = EMPTY_SQUARE;
                 squares[rTo] = rook;
                 long rookMoveMask = (1L << rFrom) | (1L << rTo);
                 pieceBitboards[rookIdx] ^= rookMoveMask;
                 colorBitboards[colorIdx] ^= rookMoveMask;
 
-                zobristKey ^= Zobrist.PIECE_SQUARE[zobristRookIdx][rFrom];
-                zobristKey ^= Zobrist.PIECE_SQUARE[zobristRookIdx][rTo];
+                zobristKey ^= Zobrist.PIECE_SQUARE[rookIdx][rFrom];
+                zobristKey ^= Zobrist.PIECE_SQUARE[rookIdx][rTo];
             } else if ((toSq % 8) == 2) {
                 int rFrom = rank * 8 + 0;
                 int rTo = rank * 8 + 3;
-                Piece rook = squares[rFrom];
-                squares[rFrom] = null;
+                byte rook = squares[rFrom];
+                squares[rFrom] = EMPTY_SQUARE;
                 squares[rTo] = rook;
                 long rookMoveMask = (1L << rFrom) | (1L << rTo);
                 pieceBitboards[rookIdx] ^= rookMoveMask;
                 colorBitboards[colorIdx] ^= rookMoveMask;
 
-                zobristKey ^= Zobrist.PIECE_SQUARE[zobristRookIdx][rFrom];
-                zobristKey ^= Zobrist.PIECE_SQUARE[zobristRookIdx][rTo];
+                zobristKey ^= Zobrist.PIECE_SQUARE[rookIdx][rFrom];
+                zobristKey ^= Zobrist.PIECE_SQUARE[rookIdx][rTo];
             }
         }
 
         if (isCapture && !isEnPassant) {
-            int capIdx = oppColorIdx * 6 + captured.getType().ordinal();
-            pieceBitboards[capIdx] ^= toMask;
+            pieceBitboards[captured] ^= toMask;
             colorBitboards[oppColorIdx] ^= toMask;
 
-            int capZobristIdx = Zobrist.getPieceIndex(captured.getType(), color.opposite());
-            zobristKey ^= Zobrist.PIECE_SQUARE[capZobristIdx][toSq];
+            zobristKey ^= Zobrist.PIECE_SQUARE[captured][toSq];
         }
 
-        Piece placedPiece = piece;
+        byte placedPiece = piece;
         if (flag >= CompactMove.PromoteToQueenFlag) {
             PieceType promoType = CompactMove.getPromotionPieceType(compactMove);
-            placedPiece = Piece.of(promoType, color);
+            placedPiece = (byte) (colorIdx * 6 + promoType.ordinal());
             int pawnIdx = colorIdx * 6 + PieceType.PAWN.ordinal();
-            int promoIdx = colorIdx * 6 + promoType.ordinal();
             pieceBitboards[pawnIdx] ^= fromMask;
-            pieceBitboards[promoIdx] ^= toMask;
+            pieceBitboards[placedPiece] ^= toMask;
             colorBitboards[colorIdx] ^= moveMask;
 
-            int promoZobristIdx = Zobrist.getPieceIndex(promoType, color);
-            zobristKey ^= Zobrist.PIECE_SQUARE[promoZobristIdx][toSq];
+            zobristKey ^= Zobrist.PIECE_SQUARE[placedPiece][toSq];
         } else {
-            int movedIdx = colorIdx * 6 + piece.getType().ordinal();
-            pieceBitboards[movedIdx] ^= moveMask;
+            pieceBitboards[piece] ^= moveMask;
             colorBitboards[colorIdx] ^= moveMask;
 
-            zobristKey ^= Zobrist.PIECE_SQUARE[movedPieceIdx][toSq];
+            zobristKey ^= Zobrist.PIECE_SQUARE[piece][toSq];
         }
         squares[toSq] = placedPiece;
 
         occupiedBitboard = colorBitboards[0] | colorBitboards[1];
 
-        if (piece.getType() == PieceType.KING) {
+        if (pieceTypeOrd == PieceType.KING.ordinal()) {
             Position toPos = Position.fromIndexFast(toSq);
             if (color == PieceColor.WHITE) {
                 whiteKingPos = toPos;
@@ -732,10 +745,10 @@ public final class Board {
         enPassantTarget = move.getPrevEnPassantTarget();
         halfmoveClock = move.getPrevHalfmoveClock();
 
-        squares[fromSq] = movedPiece;
+        squares[fromSq] = getPieceCode(movedPiece);
 
         Piece captured = move.getCapturedPiece();
-        squares[toSq] = move.isEnPassant() ? null : captured;
+        squares[toSq] = move.isEnPassant() ? EMPTY_SQUARE : getPieceCode(captured);
 
         if (move.isPromotion()) {
             int pawnIdx = colorIdx * 6 + PieceType.PAWN.ordinal();
@@ -757,7 +770,7 @@ public final class Board {
 
         if (move.isEnPassant()) {
             int capSq = (fromSq / 8) * 8 + (toSq % 8);
-            squares[capSq] = captured;
+            squares[capSq] = getPieceCode(captured);
             long capMask = 1L << capSq;
             int oppPawnIdx = oppColorIdx * 6 + PieceType.PAWN.ordinal();
             pieceBitboards[oppPawnIdx] ^= capMask;
@@ -770,8 +783,8 @@ public final class Board {
             if ((toSq % 8) == 6) {
                 int rFrom = rank * 8 + 7;
                 int rTo = rank * 8 + 5;
-                Piece rook = squares[rTo];
-                squares[rTo] = null;
+                byte rook = squares[rTo];
+                squares[rTo] = EMPTY_SQUARE;
                 squares[rFrom] = rook;
                 long rookMoveMask = (1L << rFrom) | (1L << rTo);
                 pieceBitboards[rookIdx] ^= rookMoveMask;
@@ -779,8 +792,8 @@ public final class Board {
             } else if ((toSq % 8) == 2) {
                 int rFrom = rank * 8 + 0;
                 int rTo = rank * 8 + 3;
-                Piece rook = squares[rTo];
-                squares[rTo] = null;
+                byte rook = squares[rTo];
+                squares[rTo] = EMPTY_SQUARE;
                 squares[rFrom] = rook;
                 long rookMoveMask = (1L << rFrom) | (1L << rTo);
                 pieceBitboards[rookIdx] ^= rookMoveMask;
@@ -813,11 +826,12 @@ public final class Board {
         int toSq = CompactMove.getTargetSquare(compactMove);
         int flag = CompactMove.getMoveFlag(compactMove);
 
-        Piece movedPiece = movedPieceHistory[idx];
-        Piece captured = capturedPieceHistory[idx];
-        PieceColor color = movedPiece.getColor();
-        int colorIdx = color.ordinal();
+        byte movedPiece = movedPieceHistory[idx];
+        byte captured = capturedPieceHistory[idx];
+        int colorIdx = (movedPiece >= 6) ? 1 : 0;
         int oppColorIdx = 1 - colorIdx;
+        PieceColor color = (colorIdx == 0) ? PieceColor.WHITE : PieceColor.BLACK;
+        int pieceTypeOrd = movedPiece % 6;
 
         long fromMask = 1L << fromSq;
         long toMask = 1L << toSq;
@@ -835,7 +849,7 @@ public final class Board {
         squares[fromSq] = movedPiece;
 
         boolean isEnPassant = (flag == CompactMove.EnPassantCaptureFlag);
-        squares[toSq] = isEnPassant ? null : captured;
+        squares[toSq] = isEnPassant ? EMPTY_SQUARE : captured;
 
         boolean isPromotion = (flag >= CompactMove.PromoteToQueenFlag);
         if (isPromotion) {
@@ -846,14 +860,12 @@ public final class Board {
             pieceBitboards[promoIdx] ^= toMask;
             colorBitboards[colorIdx] ^= moveMask;
         } else {
-            int movedIdx = colorIdx * 6 + movedPiece.getType().ordinal();
-            pieceBitboards[movedIdx] ^= moveMask;
+            pieceBitboards[movedPiece] ^= moveMask;
             colorBitboards[colorIdx] ^= moveMask;
         }
 
-        if (captured != null && !isEnPassant) {
-            int capIdx = oppColorIdx * 6 + captured.getType().ordinal();
-            pieceBitboards[capIdx] ^= toMask;
+        if (captured != EMPTY_SQUARE && !isEnPassant) {
+            pieceBitboards[captured] ^= toMask;
             colorBitboards[oppColorIdx] ^= toMask;
         }
 
@@ -872,8 +884,8 @@ public final class Board {
             if ((toSq % 8) == 6) {
                 int rFrom = rank * 8 + 7;
                 int rTo = rank * 8 + 5;
-                Piece rook = squares[rTo];
-                squares[rTo] = null;
+                byte rook = squares[rTo];
+                squares[rTo] = EMPTY_SQUARE;
                 squares[rFrom] = rook;
                 long rookMoveMask = (1L << rFrom) | (1L << rTo);
                 pieceBitboards[rookIdx] ^= rookMoveMask;
@@ -881,8 +893,8 @@ public final class Board {
             } else if ((toSq % 8) == 2) {
                 int rFrom = rank * 8 + 0;
                 int rTo = rank * 8 + 3;
-                Piece rook = squares[rTo];
-                squares[rTo] = null;
+                byte rook = squares[rTo];
+                squares[rTo] = EMPTY_SQUARE;
                 squares[rFrom] = rook;
                 long rookMoveMask = (1L << rFrom) | (1L << rTo);
                 pieceBitboards[rookIdx] ^= rookMoveMask;
@@ -892,7 +904,7 @@ public final class Board {
 
         occupiedBitboard = colorBitboards[0] | colorBitboards[1];
 
-        if (movedPiece.getType() == PieceType.KING) {
+        if (pieceTypeOrd == PieceType.KING.ordinal()) {
             Position fromPos = Position.fromIndexFast(fromSq);
             if (color == PieceColor.WHITE) {
                 whiteKingPos = fromPos;
@@ -908,8 +920,8 @@ public final class Board {
             positionHistorySize--;
         }
 
-        movedPieceHistory[idx] = null;
-        capturedPieceHistory[idx] = null;
+        movedPieceHistory[idx] = EMPTY_SQUARE;
+        capturedPieceHistory[idx] = EMPTY_SQUARE;
         prevEnPassantHistory[idx] = null;
     }
 

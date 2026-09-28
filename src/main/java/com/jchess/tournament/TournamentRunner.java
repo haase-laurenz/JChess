@@ -4,6 +4,11 @@ import engine.bots.KingLBot1;
 import engine.bots.JChessV1;
 import engine.bots.Random;
 
+import java.nio.file.Files;
+import java.nio.file.Paths;
+import java.util.List;
+import java.io.IOException;
+
 /**
  * Konsolen-Runner zum Ausführen von Turnieren zwischen verschiedenen KI-Engines.
  */
@@ -21,6 +26,14 @@ public class TournamentRunner {
         config.setInitialTimeMs(1_000); // 1s Startzeit
         config.setIncrementMs(50);      // 50ms Inkrement pro Zug
         config.setMaxMovesPerGame(120); // Max. 120 Züge pro Partie
+
+        try {
+            List<String> fens = Files.readAllLines(Paths.get("starting_fens.txt"));
+            config.setOpeningFens(fens);
+            System.out.println(fens.size() + " Start-FENs geladen.");
+        } catch (IOException e) {
+            System.err.println("Konnte starting_fens.txt nicht lesen: " + e.getMessage());
+        }
 
         Tournament tournament = new Tournament("JChess Herbstmeisterschaft 2026", config);
 
