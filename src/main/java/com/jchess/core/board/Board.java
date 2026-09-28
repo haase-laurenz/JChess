@@ -4,6 +4,7 @@ import com.jchess.core.engine.Zobrist;
 import com.jchess.core.piece.Piece;
 import com.jchess.core.piece.PieceColor;
 import com.jchess.core.piece.PieceType;
+import engine.bots.CompactMove;
 
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -48,6 +49,15 @@ public final class Board {
 
     private Move[] moveHistory = new Move[512];
     private int moveHistorySize = 0;
+
+    // Primitive History Arrays für zero-allocation makeMove(short)
+    private short[] compactMoveHistory = new short[512];
+    private Piece[] capturedPieceHistory = new Piece[512];
+    private Piece[] movedPieceHistory = new Piece[512];
+    private int[] prevCastlingHistory = new int[512];
+    private Position[] prevEnPassantHistory = new Position[512];
+    private int[] prevHalfmoveHistory = new int[512];
+    private long[] prevZobristHistory = new long[512];
 
     // Historie für Null-Moves
     private int[] nullCastlingHistory = new int[256];
@@ -236,12 +246,23 @@ public final class Board {
     }
 
     public List<Move> getMoveHistory() {
-        return Collections.unmodifiableList(Arrays.asList(Arrays.copyOf(moveHistory, moveHistorySize)));
+        List<Move> list = new ArrayList<>(moveHistorySize);
+        for (int i = 0; i < moveHistorySize; i++) {
+            if (moveHistory[i] == null) {
+                moveHistory[i] = CompactMove.toStandardMove(compactMoveHistory[i], this);
+            }
+            list.add(moveHistory[i]);
+        }
+        return Collections.unmodifiableList(list);
     }
 
     public Move getLastMove() {
         if (moveHistorySize == 0) return null;
-        return moveHistory[moveHistorySize - 1];
+        int idx = moveHistorySize - 1;
+        if (moveHistory[idx] == null) {
+            moveHistory[idx] = CompactMove.toStandardMove(compactMoveHistory[idx], this);
+        }
+        return moveHistory[idx];
     }
 
     /**
@@ -421,6 +442,189 @@ public final class Board {
     }
 
     /**
+     * Führt einen kompakten 16-Bit-Zug (CompactMove) OHNE JEGLICHE Heap-Allokation aus.
+     * Perfekt für Engine-Suchen mit maximalem Durchsatz (NPS).
+     */
+    public void makeMove(short compactMove) {
+        int fromSq = CompactMove.getStartSquare(compactMove);
+        int toSq = CompactMove.getTargetSquare(compactMove);
+        int flag = CompactMove.getMoveFlag(compactMove);
+
+        Piece piece = squares[fromSq];
+        Piece captured = squares[toSq];
+        PieceColor color = piece.getColor();
+        int colorIdx = color.ordinal();
+        int oppColorIdx = 1 - colorIdx;
+
+        int oldCastlingRights = this.castlingRights;
+        Position oldEnPassantTarget = this.enPassantTarget;
+        int oldHalfmoveClock = this.halfmoveClock;
+        long oldZobristKey = this.zobristKey;
+
+        if (moveHistorySize == compactMoveHistory.length) {
+            int newCap = compactMoveHistory.length * 2;
+            compactMoveHistory = Arrays.copyOf(compactMoveHistory, newCap);
+            capturedPieceHistory = Arrays.copyOf(capturedPieceHistory, newCap);
+            movedPieceHistory = Arrays.copyOf(movedPieceHistory, newCap);
+            prevCastlingHistory = Arrays.copyOf(prevCastlingHistory, newCap);
+            prevEnPassantHistory = Arrays.copyOf(prevEnPassantHistory, newCap);
+            prevHalfmoveHistory = Arrays.copyOf(prevHalfmoveHistory, newCap);
+            prevZobristHistory = Arrays.copyOf(prevZobristHistory, newCap);
+            moveHistory = Arrays.copyOf(moveHistory, newCap);
+        }
+
+        compactMoveHistory[moveHistorySize] = compactMove;
+        movedPieceHistory[moveHistorySize] = piece;
+        prevCastlingHistory[moveHistorySize] = oldCastlingRights;
+        prevEnPassantHistory[moveHistorySize] = oldEnPassantTarget;
+        prevHalfmoveHistory[moveHistorySize] = oldHalfmoveClock;
+        prevZobristHistory[moveHistorySize] = oldZobristKey;
+        moveHistory[moveHistorySize] = null; // Mark that this was a compact move
+
+        long fromMask = 1L << fromSq;
+        long toMask = 1L << toSq;
+        long moveMask = fromMask | toMask;
+
+        int movedPieceIdx = Zobrist.getPieceIndex(piece.getType(), color);
+        zobristKey ^= Zobrist.PIECE_SQUARE[movedPieceIdx][fromSq];
+
+        boolean isCapture = (captured != null);
+        boolean isEnPassant = (flag == CompactMove.EnPassantCaptureFlag);
+
+        if (piece.getType() == PieceType.PAWN || isCapture || isEnPassant) {
+            halfmoveClock = 0;
+        } else {
+            halfmoveClock++;
+        }
+
+        squares[fromSq] = null;
+
+        if (isEnPassant) {
+            int capSq = (fromSq / 8) * 8 + (toSq % 8);
+            captured = squares[capSq];
+            squares[capSq] = null;
+            long capMask = 1L << capSq;
+            int oppPawnIdx = oppColorIdx * 6 + PieceType.PAWN.ordinal();
+            pieceBitboards[oppPawnIdx] ^= capMask;
+            colorBitboards[oppColorIdx] ^= capMask;
+
+            int oppZobristPawnIdx = Zobrist.getPieceIndex(PieceType.PAWN, color.opposite());
+            zobristKey ^= Zobrist.PIECE_SQUARE[oppZobristPawnIdx][capSq];
+        }
+
+        capturedPieceHistory[moveHistorySize] = captured;
+
+        if (flag == CompactMove.CastleFlag) {
+            int rank = fromSq / 8;
+            int rookIdx = colorIdx * 6 + PieceType.ROOK.ordinal();
+            int zobristRookIdx = Zobrist.getPieceIndex(PieceType.ROOK, color);
+            if ((toSq % 8) == 6) {
+                int rFrom = rank * 8 + 7;
+                int rTo = rank * 8 + 5;
+                Piece rook = squares[rFrom];
+                squares[rFrom] = null;
+                squares[rTo] = rook;
+                long rookMoveMask = (1L << rFrom) | (1L << rTo);
+                pieceBitboards[rookIdx] ^= rookMoveMask;
+                colorBitboards[colorIdx] ^= rookMoveMask;
+
+                zobristKey ^= Zobrist.PIECE_SQUARE[zobristRookIdx][rFrom];
+                zobristKey ^= Zobrist.PIECE_SQUARE[zobristRookIdx][rTo];
+            } else if ((toSq % 8) == 2) {
+                int rFrom = rank * 8 + 0;
+                int rTo = rank * 8 + 3;
+                Piece rook = squares[rFrom];
+                squares[rFrom] = null;
+                squares[rTo] = rook;
+                long rookMoveMask = (1L << rFrom) | (1L << rTo);
+                pieceBitboards[rookIdx] ^= rookMoveMask;
+                colorBitboards[colorIdx] ^= rookMoveMask;
+
+                zobristKey ^= Zobrist.PIECE_SQUARE[zobristRookIdx][rFrom];
+                zobristKey ^= Zobrist.PIECE_SQUARE[zobristRookIdx][rTo];
+            }
+        }
+
+        if (isCapture && !isEnPassant) {
+            int capIdx = oppColorIdx * 6 + captured.getType().ordinal();
+            pieceBitboards[capIdx] ^= toMask;
+            colorBitboards[oppColorIdx] ^= toMask;
+
+            int capZobristIdx = Zobrist.getPieceIndex(captured.getType(), color.opposite());
+            zobristKey ^= Zobrist.PIECE_SQUARE[capZobristIdx][toSq];
+        }
+
+        Piece placedPiece = piece;
+        if (flag >= CompactMove.PromoteToQueenFlag) {
+            PieceType promoType = CompactMove.getPromotionPieceType(compactMove);
+            placedPiece = Piece.of(promoType, color);
+            int pawnIdx = colorIdx * 6 + PieceType.PAWN.ordinal();
+            int promoIdx = colorIdx * 6 + promoType.ordinal();
+            pieceBitboards[pawnIdx] ^= fromMask;
+            pieceBitboards[promoIdx] ^= toMask;
+            colorBitboards[colorIdx] ^= moveMask;
+
+            int promoZobristIdx = Zobrist.getPieceIndex(promoType, color);
+            zobristKey ^= Zobrist.PIECE_SQUARE[promoZobristIdx][toSq];
+        } else {
+            int movedIdx = colorIdx * 6 + piece.getType().ordinal();
+            pieceBitboards[movedIdx] ^= moveMask;
+            colorBitboards[colorIdx] ^= moveMask;
+
+            zobristKey ^= Zobrist.PIECE_SQUARE[movedPieceIdx][toSq];
+        }
+        squares[toSq] = placedPiece;
+
+        occupiedBitboard = colorBitboards[0] | colorBitboards[1];
+
+        if (piece.getType() == PieceType.KING) {
+            Position toPos = Position.fromIndexFast(toSq);
+            if (color == PieceColor.WHITE) {
+                whiteKingPos = toPos;
+                whiteKingSquare = toSq;
+                castlingRights &= ~(CASTLE_WHITE_KINGSIDE | CASTLE_WHITE_QUEENSIDE);
+            } else {
+                blackKingPos = toPos;
+                blackKingSquare = toSq;
+                castlingRights &= ~(CASTLE_BLACK_KINGSIDE | CASTLE_BLACK_QUEENSIDE);
+            }
+        }
+
+        updateCastlingRightsOnSquare(fromSq);
+        updateCastlingRightsOnSquare(toSq);
+
+        zobristKey ^= Zobrist.CASTLING_RIGHTS[oldCastlingRights & 15];
+        zobristKey ^= Zobrist.CASTLING_RIGHTS[this.castlingRights & 15];
+
+        if (flag == CompactMove.PawnTwoUpFlag) {
+            int dir = color.getPawnDirection();
+            enPassantTarget = Position.of(fromSq % 8, fromSq / 8 + dir);
+        } else {
+            enPassantTarget = null;
+        }
+
+        if (oldEnPassantTarget != null) {
+            zobristKey ^= Zobrist.EN_PASSANT_FILE[oldEnPassantTarget.getFile()];
+        }
+        if (this.enPassantTarget != null) {
+            zobristKey ^= Zobrist.EN_PASSANT_FILE[this.enPassantTarget.getFile()];
+        }
+
+        if (activePlayer == PieceColor.BLACK) {
+            fullmoveNumber++;
+        }
+        activePlayer = activePlayer.opposite();
+        zobristKey ^= Zobrist.SIDE_TO_MOVE;
+
+        moveHistorySize++;
+
+        if (positionHistorySize == positionHistory.length) {
+            positionHistory = Arrays.copyOf(positionHistory, positionHistory.length * 2);
+        }
+        positionHistory[positionHistorySize++] = zobristKey;
+    }
+
+    /**
      * Führt einen "Null-Zug" aus (die eigene Runde überspringen).
      * Ändert nur den aktiven Spieler, das En-Passant-Feld und Zobrist-Keys.
      */
@@ -491,8 +695,21 @@ public final class Board {
     public boolean undoMove() {
         if (moveHistorySize == 0) return false;
 
-        Move move = moveHistory[--moveHistorySize];
-        moveHistory[moveHistorySize] = null; // GC-freundlich
+        int idx = --moveHistorySize;
+        Move move = moveHistory[idx];
+
+        if (move != null) {
+            undoStandardMove(move, idx);
+            return true;
+        }
+
+        undoCompactMove(idx);
+        return true;
+    }
+
+    private void undoStandardMove(Move move, int idx) {
+        // Schneller Original-Pfad für Standard-Moves (z.B. in Perft)
+        moveHistory[idx] = null;
         Position from = move.getFrom();
         Position to = move.getTo();
         Piece movedPiece = move.getMovedPiece();
@@ -506,25 +723,20 @@ public final class Board {
         long toMask = 1L << toSq;
         long moveMask = fromMask | toMask;
 
-        // Rundenwechsel rückgängig
         activePlayer = activePlayer.opposite();
         if (activePlayer == PieceColor.BLACK) {
             fullmoveNumber--;
         }
 
-        // Zustände wiederherstellen
         castlingRights = move.getPrevCastlingRights();
         enPassantTarget = move.getPrevEnPassantTarget();
         halfmoveClock = move.getPrevHalfmoveClock();
 
-        // Gezogene Figur auf Ursprungsfeld setzen
         squares[fromSq] = movedPiece;
 
-        // Zielfeld wiederherstellen (geschlagene Figur oder leer)
         Piece captured = move.getCapturedPiece();
         squares[toSq] = move.isEnPassant() ? null : captured;
 
-        // Bitboards der bewegten Figur zurücksetzen
         if (move.isPromotion()) {
             int pawnIdx = colorIdx * 6 + PieceType.PAWN.ordinal();
             int promoIdx = colorIdx * 6 + move.getPromotionType().ordinal();
@@ -537,14 +749,12 @@ public final class Board {
             colorBitboards[colorIdx] ^= moveMask;
         }
 
-        // Geschlagene Figur im Bitboard wiederherstellen
         if (move.isCapture() && !move.isEnPassant()) {
             int capIdx = oppColorIdx * 6 + captured.getType().ordinal();
             pieceBitboards[capIdx] ^= toMask;
             colorBitboards[oppColorIdx] ^= toMask;
         }
 
-        // En Passant geschlagenen Bauern wiederherstellen
         if (move.isEnPassant()) {
             int capSq = (fromSq / 8) * 8 + (toSq % 8);
             squares[capSq] = captured;
@@ -554,12 +764,10 @@ public final class Board {
             colorBitboards[oppColorIdx] ^= capMask;
         }
 
-        // Rochade Turm rückgängig machen
         if (move.isCastle()) {
             int rank = fromSq / 8;
             int rookIdx = colorIdx * 6 + PieceType.ROOK.ordinal();
             if ((toSq % 8) == 6) {
-                // Turm von 5 zurück auf 7
                 int rFrom = rank * 8 + 7;
                 int rTo = rank * 8 + 5;
                 Piece rook = squares[rTo];
@@ -569,7 +777,6 @@ public final class Board {
                 pieceBitboards[rookIdx] ^= rookMoveMask;
                 colorBitboards[colorIdx] ^= rookMoveMask;
             } else if ((toSq % 8) == 2) {
-                // Turm von 3 zurück auf 0
                 int rFrom = rank * 8 + 0;
                 int rTo = rank * 8 + 3;
                 Piece rook = squares[rTo];
@@ -583,7 +790,6 @@ public final class Board {
 
         occupiedBitboard = colorBitboards[0] | colorBitboards[1];
 
-        // Königsposition tracken
         if (movedPiece.getType() == PieceType.KING) {
             if (color == PieceColor.WHITE) {
                 whiteKingPos = from;
@@ -594,13 +800,117 @@ public final class Board {
             }
         }
 
-        // Zobrist-Key und Position-History wiederherstellen
         this.zobristKey = move.getPrevZobristKey();
         if (positionHistorySize > 0) {
             positionHistorySize--;
         }
+    }
 
-        return true;
+    private void undoCompactMove(int idx) {
+        // Compact-Move-Pfad (für Engine-Suchen)
+        short compactMove = compactMoveHistory[idx];
+        int fromSq = CompactMove.getStartSquare(compactMove);
+        int toSq = CompactMove.getTargetSquare(compactMove);
+        int flag = CompactMove.getMoveFlag(compactMove);
+
+        Piece movedPiece = movedPieceHistory[idx];
+        Piece captured = capturedPieceHistory[idx];
+        PieceColor color = movedPiece.getColor();
+        int colorIdx = color.ordinal();
+        int oppColorIdx = 1 - colorIdx;
+
+        long fromMask = 1L << fromSq;
+        long toMask = 1L << toSq;
+        long moveMask = fromMask | toMask;
+
+        activePlayer = activePlayer.opposite();
+        if (activePlayer == PieceColor.BLACK) {
+            fullmoveNumber--;
+        }
+
+        castlingRights = prevCastlingHistory[idx];
+        enPassantTarget = prevEnPassantHistory[idx];
+        halfmoveClock = prevHalfmoveHistory[idx];
+
+        squares[fromSq] = movedPiece;
+
+        boolean isEnPassant = (flag == CompactMove.EnPassantCaptureFlag);
+        squares[toSq] = isEnPassant ? null : captured;
+
+        boolean isPromotion = (flag >= CompactMove.PromoteToQueenFlag);
+        if (isPromotion) {
+            PieceType promoType = CompactMove.getPromotionPieceType(compactMove);
+            int pawnIdx = colorIdx * 6 + PieceType.PAWN.ordinal();
+            int promoIdx = colorIdx * 6 + promoType.ordinal();
+            pieceBitboards[pawnIdx] ^= fromMask;
+            pieceBitboards[promoIdx] ^= toMask;
+            colorBitboards[colorIdx] ^= moveMask;
+        } else {
+            int movedIdx = colorIdx * 6 + movedPiece.getType().ordinal();
+            pieceBitboards[movedIdx] ^= moveMask;
+            colorBitboards[colorIdx] ^= moveMask;
+        }
+
+        if (captured != null && !isEnPassant) {
+            int capIdx = oppColorIdx * 6 + captured.getType().ordinal();
+            pieceBitboards[capIdx] ^= toMask;
+            colorBitboards[oppColorIdx] ^= toMask;
+        }
+
+        if (isEnPassant) {
+            int capSq = (fromSq / 8) * 8 + (toSq % 8);
+            squares[capSq] = captured;
+            long capMask = 1L << capSq;
+            int oppPawnIdx = oppColorIdx * 6 + PieceType.PAWN.ordinal();
+            pieceBitboards[oppPawnIdx] ^= capMask;
+            colorBitboards[oppColorIdx] ^= capMask;
+        }
+
+        if (flag == CompactMove.CastleFlag) {
+            int rank = fromSq / 8;
+            int rookIdx = colorIdx * 6 + PieceType.ROOK.ordinal();
+            if ((toSq % 8) == 6) {
+                int rFrom = rank * 8 + 7;
+                int rTo = rank * 8 + 5;
+                Piece rook = squares[rTo];
+                squares[rTo] = null;
+                squares[rFrom] = rook;
+                long rookMoveMask = (1L << rFrom) | (1L << rTo);
+                pieceBitboards[rookIdx] ^= rookMoveMask;
+                colorBitboards[colorIdx] ^= rookMoveMask;
+            } else if ((toSq % 8) == 2) {
+                int rFrom = rank * 8 + 0;
+                int rTo = rank * 8 + 3;
+                Piece rook = squares[rTo];
+                squares[rTo] = null;
+                squares[rFrom] = rook;
+                long rookMoveMask = (1L << rFrom) | (1L << rTo);
+                pieceBitboards[rookIdx] ^= rookMoveMask;
+                colorBitboards[colorIdx] ^= rookMoveMask;
+            }
+        }
+
+        occupiedBitboard = colorBitboards[0] | colorBitboards[1];
+
+        if (movedPiece.getType() == PieceType.KING) {
+            Position fromPos = Position.fromIndexFast(fromSq);
+            if (color == PieceColor.WHITE) {
+                whiteKingPos = fromPos;
+                whiteKingSquare = fromSq;
+            } else {
+                blackKingPos = fromPos;
+                blackKingSquare = fromSq;
+            }
+        }
+
+        this.zobristKey = prevZobristHistory[idx];
+        if (positionHistorySize > 0) {
+            positionHistorySize--;
+        }
+
+        movedPieceHistory[idx] = null;
+        capturedPieceHistory[idx] = null;
+        prevEnPassantHistory[idx] = null;
     }
 
     public long getBitboard(PieceType type, PieceColor color) {

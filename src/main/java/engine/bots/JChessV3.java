@@ -104,6 +104,50 @@ public class JChessV3 implements ChessEngine {
 
     private static final double MATE_SCORE = 30000.0;
 
+    private static final long[][] PASSED_PAWN_MASK = new long[2][64];
+    private static final long[][] PAWN_SUPPORT_MASK = new long[2][64];
+    
+    static {
+        for (int sq = 0; sq < 64; sq++) {
+            int file = sq % 8;
+            int rank = sq / 8;
+            
+            // White passed pawn mask
+            long wMask = 0L;
+            for (int r = rank + 1; r < 8; r++) {
+                wMask |= (1L << (r * 8 + file));
+                if (file > 0) wMask |= (1L << (r * 8 + file - 1));
+                if (file < 7) wMask |= (1L << (r * 8 + file + 1));
+            }
+            PASSED_PAWN_MASK[PieceColor.WHITE.ordinal()][sq] = wMask;
+            
+            // White support mask (rank - 1, file - 1 and file + 1)
+            long wSupport = 0L;
+            if (rank > 0) {
+                if (file > 0) wSupport |= (1L << ((rank - 1) * 8 + file - 1));
+                if (file < 7) wSupport |= (1L << ((rank - 1) * 8 + file + 1));
+            }
+            PAWN_SUPPORT_MASK[PieceColor.WHITE.ordinal()][sq] = wSupport;
+            
+            // Black passed pawn mask
+            long bMask = 0L;
+            for (int r = rank - 1; r >= 0; r--) {
+                bMask |= (1L << (r * 8 + file));
+                if (file > 0) bMask |= (1L << (r * 8 + file - 1));
+                if (file < 7) bMask |= (1L << (r * 8 + file + 1));
+            }
+            PASSED_PAWN_MASK[PieceColor.BLACK.ordinal()][sq] = bMask;
+            
+            // Black support mask (rank + 1, file - 1 and file + 1)
+            long bSupport = 0L;
+            if (rank < 7) {
+                if (file > 0) bSupport |= (1L << ((rank + 1) * 8 + file - 1));
+                if (file < 7) bSupport |= (1L << ((rank + 1) * 8 + file + 1));
+            }
+            PAWN_SUPPORT_MASK[PieceColor.BLACK.ordinal()][sq] = bSupport;
+        }
+    }
+
     private final String name;
     private int searchDepth;
     private boolean useFixedDepth;
@@ -122,6 +166,20 @@ public class JChessV3 implements ChessEngine {
     private final TT16 transpositionTable = new TT16();
     private final short[][] killerMoves = new short[100][2];
     private final int[][][] historyTable = new int[2][64][64];
+
+    // Preallocated per-ply buffers to avoid GC pressure in the hot path
+    private static final int MAX_PLY = 128;
+    private final short[][] plyMoves      = new short[MAX_PLY][256];  // search/searchRoot: legal moves
+    private final short[][] plyQuiets     = new short[MAX_PLY][256];  // search: searched quiets for history gravity
+    private final short[][] plyEvasions   = new short[MAX_PLY][256];  // quiescence: check evasions
+    private final short[][] plyQMoves     = new short[MAX_PLY][256];  // quiescence: pseudo-legal moves
+    private final short[][] plyTacticals  = new short[MAX_PLY][256];  // quiescence: tactical moves
+    private final short[][] plyPseudo     = new short[MAX_PLY][256];  // generateLegalMoves: pseudo-legal buffer
+    private final int[][]   plyScores     = new int[MAX_PLY][256];    // orderMoves: scoring buffer
+    private final int[]     seeGain       = new int[32];              // see: gain array (non-recursive)
+
+    private final int[] whitePawnsOnFile = new int[8];
+    private final int[] blackPawnsOnFile = new int[8];
 
     public void stopSearch() {
         this.stopRequested = true;
@@ -172,8 +230,8 @@ public class JChessV3 implements ChessEngine {
     }
 
     public Move findBestMoveWithListener(Board board, PieceColor color, ChessClock clock, DepthListener listener) {
-        short[] legalMoves = new short[256];
-        int legalCount = generateLegalMoves(board, color, legalMoves);
+        short[] legalMoves = plyMoves[0];
+        int legalCount = generateLegalMoves(board, color, legalMoves, 0);
         
         if (legalCount == 0) return null;
         if (legalCount == 1) {
@@ -252,23 +310,50 @@ public class JChessV3 implements ChessEngine {
     }
 
     private double searchRoot(Board board, int depth, PieceColor color, long deadline, short pvMove, double alpha, double beta) {
-        short[] moves = new short[256];
-        int count = generateLegalMoves(board, color, moves);
+        short[] moves = plyMoves[0];
+        int count = generateLegalMoves(board, color, moves, 0);
 
         TT16.TTEntry ttEntry = transpositionTable.probe(board.getZobristKey(), 0);
         short preferredMove = (pvMove != 0) ? pvMove : (ttEntry != null ? ttEntry.bestMove : 0);
-        orderMoves(moves, count, preferredMove, 0, color, board);
+        scoreMoves(moves, count, preferredMove, 0, color, board);
 
         double maxScore = -MATE_SCORE;
+        int[] scores = plyScores[0];
 
         for (int i=0; i<count; i++) {
             if (stopRequested || Thread.currentThread().isInterrupted() || System.currentTimeMillis() >= deadline) {
                 timeExceeded = true;
                 break;
             }
+
+            // Pick-best: select highest scored move from index i to count-1
+            int bestIdx = i;
+            int bestScore = scores[i];
+            for (int j = i + 1; j < count; j++) {
+                if (scores[j] > bestScore) {
+                    bestScore = scores[j];
+                    bestIdx = j;
+                }
+            }
+            if (bestIdx != i) {
+                scores[bestIdx] = scores[i];
+                scores[i] = bestScore;
+                short tempM = moves[i];
+                moves[i] = moves[bestIdx];
+                moves[bestIdx] = tempM;
+            }
+
             short move = moves[i];
-            board.makeMove(CompactMove.toStandardMove(move, board));
-            double score = -search(board, -beta, -alpha, depth - 1, 1, 0, color.opposite(), deadline, true);
+            board.makeMove(move);
+            double score;
+            if (i == 0) {
+                score = -search(board, -beta, -alpha, depth - 1, 1, 0, color.opposite(), deadline, true);
+            } else {
+                score = -search(board, -alpha - 1, -alpha, depth - 1, 1, 0, color.opposite(), deadline, true);
+                if (score > alpha && score < beta) {
+                    score = -search(board, -beta, -alpha, depth - 1, 1, 0, color.opposite(), deadline, true);
+                }
+            }
             board.undoMove();
 
             if (timeExceeded || stopRequested) break;
@@ -317,13 +402,14 @@ public class JChessV3 implements ChessEngine {
             if (ttEntry.flag == TT16.FLAG_UPPERBOUND && ttEntry.score <= alpha) return ttEntry.score;
         }
 
-        short[] moves = new short[256];
-        int count = generateLegalMoves(board, color, moves);
+        int safePly = Math.min(ply, MAX_PLY - 1);
+        short[] moves = plyMoves[safePly];
+        int count = generatePseudoLegalMoves(board, color, moves);
 
         if (count == 0) return inCheck ? -MATE_SCORE + ply : 0.0;
 
         short ttMove = (ttEntry != null) ? ttEntry.bestMove : 0;
-        orderMoves(moves, count, ttMove, ply, color, board);
+        scoreMoves(moves, count, ttMove, ply, color, board);
 
         double originalAlpha = alpha;
         short bestMove = 0;
@@ -335,27 +421,85 @@ public class JChessV3 implements ChessEngine {
             if (staticEval + effectiveDepth * 200 <= alpha) fPrune = true;
         }
 
+        short[] searchedQuiets = plyQuiets[safePly];
+        int quietsSearched = 0;
+        int legalMovesSearched = 0;
+        int[] scores = plyScores[safePly];
+
+        boolean isPvNode = (beta - alpha > 1.0);
+
         for (int i=0; i<count; i++) {
+            // Pick-best: select highest scored move from index i to count-1
+            int bestIdx = i;
+            int bestScore = scores[i];
+            for (int j = i + 1; j < count; j++) {
+                if (scores[j] > bestScore) {
+                    bestScore = scores[j];
+                    bestIdx = j;
+                }
+            }
+            if (bestIdx != i) {
+                scores[bestIdx] = scores[i];
+                scores[i] = bestScore;
+                short tempM = moves[i];
+                moves[i] = moves[bestIdx];
+                moves[bestIdx] = tempM;
+            }
+
             short move = moves[i];
-            Move stdMove = CompactMove.toStandardMove(move, board);
-            board.makeMove(stdMove);
-            boolean givesCheck = MoveGenerator.isKingInCheck(board, color.opposite());
-            boolean isQuiet = !stdMove.isCapture() && !stdMove.isPromotion() && !givesCheck;
-            
-            if (fPrune && i > 0 && isQuiet) {
+            int fromSq = CompactMove.getStartSquare(move);
+            int toSq = CompactMove.getTargetSquare(move);
+            int moveFlag = CompactMove.getMoveFlag(move);
+            boolean isCapture = (board.getPieceAtIndex(toSq) != null) || (moveFlag == CompactMove.EnPassantCaptureFlag);
+            boolean isPromotion = (moveFlag >= CompactMove.PromoteToQueenFlag);
+
+            board.makeMove(move);
+
+            // Lazy legality check: if king is in check after the move, it was illegal
+            if (MoveGenerator.isKingInCheck(board, color)) {
                 board.undoMove();
                 continue;
             }
 
+            boolean givesCheck = MoveGenerator.isKingInCheck(board, color.opposite());
+            boolean isQuiet = !isCapture && !isPromotion && !givesCheck;
+            
+            if (fPrune && legalMovesSearched > 0 && isQuiet) {
+                board.undoMove();
+                continue;
+            }
+
+            legalMovesSearched++;
+            int newDepth = depth - 1 + extension;
             double score;
-            if (depth >= 3 && i >= 4 && !inCheck && isQuiet) {
-                int reduction = (i > 6) ? 2 : 1;
-                score = -search(board, -beta, -alpha, depth - 1 + extension - reduction, ply + 1, numExtensions + extension, color.opposite(), deadline, true);
-                if (score > alpha) {
-                    score = -search(board, -beta, -alpha, depth - 1 + extension, ply + 1, numExtensions + extension, color.opposite(), deadline, true);
-                }
+
+            if (legalMovesSearched == 1) {
+                score = -search(board, -beta, -alpha, newDepth, ply + 1, numExtensions + extension, color.opposite(), deadline, true);
             } else {
-                score = -search(board, -beta, -alpha, depth - 1 + extension, ply + 1, numExtensions + extension, color.opposite(), deadline, true);
+                int reduction = 0;
+                if (effectiveDepth >= 3 && legalMovesSearched >= 4 && !inCheck && isQuiet) {
+                    reduction = 1;
+                    if (effectiveDepth >= 6 && legalMovesSearched >= 8)
+                        reduction++;
+                    // History: moves that historically failed to cause cutoffs get reduced more
+                    int histScore = historyTable[color.ordinal()][fromSq][toSq];
+                    if (histScore < 0)
+                        reduction++;
+                    reduction = Math.min(reduction, effectiveDepth - 2);
+                }
+
+                if (reduction > 0) {
+                    score = -search(board, -alpha - 1, -alpha, newDepth - reduction, ply + 1, numExtensions + extension, color.opposite(), deadline, true);
+                    if (score > alpha) {
+                        score = -search(board, -alpha - 1, -alpha, newDepth, ply + 1, numExtensions + extension, color.opposite(), deadline, true);
+                    }
+                } else {
+                    score = -search(board, -alpha - 1, -alpha, newDepth, ply + 1, numExtensions + extension, color.opposite(), deadline, true);
+                }
+
+                if (isPvNode && score > alpha && score < beta) {
+                    score = -search(board, -beta, -alpha, newDepth, ply + 1, numExtensions + extension, color.opposite(), deadline, true);
+                }
             }
             board.undoMove();
 
@@ -368,11 +512,23 @@ public class JChessV3 implements ChessEngine {
                         killerMoves[ply][1] = killerMoves[ply][0];
                         killerMoves[ply][0] = move;
                     }
-                    historyTable[color.ordinal()][CompactMove.getStartSquare(move)][CompactMove.getTargetSquare(move)] += depth * depth;
+                    historyTable[color.ordinal()][fromSq][toSq] += effectiveDepth * effectiveDepth;
+                    // History gravity: penalize all quiet moves tried before the cutoff move
+                    for (int q = 0; q < quietsSearched; q++) {
+                        int qs = CompactMove.getStartSquare(searchedQuiets[q]);
+                        int qt = CompactMove.getTargetSquare(searchedQuiets[q]);
+                        historyTable[color.ordinal()][qs][qt] -= effectiveDepth * effectiveDepth;
+                    }
                 }
                 break;
             }
+            // Track searched quiet moves for history gravity
+            if (isQuiet) {
+                searchedQuiets[quietsSearched++] = move;
+            }
         }
+
+        if (legalMovesSearched == 0) return inCheck ? -MATE_SCORE + ply : 0.0;
 
         if (!timeExceeded && !stopRequested) {
             byte flag = maxScore >= beta ? TT16.FLAG_LOWERBOUND : (maxScore > originalAlpha ? TT16.FLAG_EXACT : TT16.FLAG_UPPERBOUND);
@@ -389,18 +545,45 @@ public class JChessV3 implements ChessEngine {
 
         boolean inCheck = MoveGenerator.isKingInCheck(board, color);
         if (inCheck) {
-            short[] evasions = new short[256];
-            int count = generateLegalMoves(board, color, evasions);
+            int safePly = Math.min(ply, MAX_PLY - 1);
+            short[] evasions = plyEvasions[safePly];
+            int count = generatePseudoLegalMoves(board, color, evasions);
             if (count == 0) return -MATE_SCORE + ply;
-            orderMoves(evasions, count, (short)0, ply, color, board);
+            scoreMoves(evasions, count, (short)0, ply, color, board);
+            int[] scores = plyScores[safePly];
+            int legalEvasions = 0;
+
             for (int i=0; i<count; i++) {
-                board.makeMove(CompactMove.toStandardMove(evasions[i], board));
+                int bestIdx = i;
+                int bestScore = scores[i];
+                for (int j = i + 1; j < count; j++) {
+                    if (scores[j] > bestScore) {
+                        bestScore = scores[j];
+                        bestIdx = j;
+                    }
+                }
+                if (bestIdx != i) {
+                    scores[bestIdx] = scores[i];
+                    scores[i] = bestScore;
+                    short tempM = evasions[i];
+                    evasions[i] = evasions[bestIdx];
+                    evasions[bestIdx] = tempM;
+                }
+
+                short move = evasions[i];
+                board.makeMove(move);
+                if (MoveGenerator.isKingInCheck(board, color)) {
+                    board.undoMove();
+                    continue;
+                }
+                legalEvasions++;
                 double score = -quiescence(board, -beta, -alpha, color.opposite(), ply + 1, deadline);
                 board.undoMove();
                 if (timeExceeded || stopRequested) return 0.0;
                 if (score >= beta) return beta;
                 if (score > alpha) alpha = score;
             }
+            if (legalEvasions == 0) return -MATE_SCORE + ply;
             return alpha;
         }
 
@@ -408,25 +591,52 @@ public class JChessV3 implements ChessEngine {
         if (standPat >= beta) return beta;
         if (standPat > alpha) alpha = standPat;
 
-        short[] moves = new short[256];
+        int safePly = Math.min(ply, MAX_PLY - 1);
+        short[] moves = plyQMoves[safePly];
         int count = generatePseudoLegalMoves(board, color, moves);
-        short[] tacticalMoves = new short[256];
+        short[] tacticalMoves = plyTacticals[safePly];
         int tCount = 0;
         for (int i=0; i<count; i++) {
             short m = moves[i];
-            if (CompactMove.getMoveFlag(m) >= CompactMove.PromoteToQueenFlag || board.getPieceAtIndex(CompactMove.getTargetSquare(m)) != null || CompactMove.getMoveFlag(m) == CompactMove.EnPassantCaptureFlag) {
-                board.makeMove(CompactMove.toStandardMove(m, board));
+            int moveFlag = CompactMove.getMoveFlag(m);
+            boolean isCapture = board.getPieceAtIndex(CompactMove.getTargetSquare(m)) != null || moveFlag == CompactMove.EnPassantCaptureFlag;
+            boolean isPromotion = moveFlag >= CompactMove.PromoteToQueenFlag;
+            
+            if (isCapture || isPromotion) {
+                // SEE pruning for captures
+                if (isCapture && !isPromotion && see(board, m) < 0) {
+                    continue;
+                }
+
+                board.makeMove(m);
                 if (!MoveGenerator.isKingInCheck(board, color)) tacticalMoves[tCount++] = m;
                 board.undoMove();
             }
         }
         
         if (tCount == 0) return standPat;
-        orderMoves(tacticalMoves, tCount, (short)0, ply, color, board);
+        scoreMoves(tacticalMoves, tCount, (short)0, safePly, color, board);
+        int[] scores = plyScores[safePly];
 
         for (int i=0; i<tCount; i++) {
+            int bestIdx = i;
+            int bestScore = scores[i];
+            for (int j = i + 1; j < tCount; j++) {
+                if (scores[j] > bestScore) {
+                    bestScore = scores[j];
+                    bestIdx = j;
+                }
+            }
+            if (bestIdx != i) {
+                scores[bestIdx] = scores[i];
+                scores[i] = bestScore;
+                short tempM = tacticalMoves[i];
+                tacticalMoves[i] = tacticalMoves[bestIdx];
+                tacticalMoves[bestIdx] = tempM;
+            }
+
             short move = tacticalMoves[i];
-            board.makeMove(CompactMove.toStandardMove(move, board));
+            board.makeMove(move);
             double score = -quiescence(board, -beta, -alpha, color.opposite(), ply + 1, deadline);
             board.undoMove();
             if (timeExceeded || stopRequested) return 0.0;
@@ -436,8 +646,9 @@ public class JChessV3 implements ChessEngine {
         return alpha;
     }
 
-    private void orderMoves(short[] moves, int count, short ttMove, int ply, PieceColor color, Board board) {
-        int[] scores = new int[count];
+    private void scoreMoves(short[] moves, int count, short ttMove, int ply, PieceColor color, Board board) {
+        int safePly = Math.min(ply, MAX_PLY - 1);
+        int[] scores = plyScores[safePly];
         for (int i = 0; i < count; i++) {
             short m = moves[i];
             if (m == ttMove) {
@@ -466,6 +677,12 @@ public class JChessV3 implements ChessEngine {
             }
             scores[i] = score;
         }
+    }
+
+    private void orderMoves(short[] moves, int count, short ttMove, int ply, PieceColor color, Board board) {
+        scoreMoves(moves, count, ttMove, ply, color, board);
+        int safePly = Math.min(ply, MAX_PLY - 1);
+        int[] scores = plyScores[safePly];
         for (int i = 0; i < count - 1; i++) {
             for (int j = i + 1; j < count; j++) {
                 if (scores[j] > scores[i]) {
@@ -476,13 +693,13 @@ public class JChessV3 implements ChessEngine {
         }
     }
 
-    private int generateLegalMoves(Board board, PieceColor color, short[] moves) {
-        short[] pseudo = new short[256];
+    private int generateLegalMoves(Board board, PieceColor color, short[] moves, int safePly) {
+        short[] pseudo = plyPseudo[safePly];
         int pCount = generatePseudoLegalMoves(board, color, pseudo);
         int lCount = 0;
         for (int i = 0; i < pCount; i++) {
             short m = pseudo[i];
-            board.makeMove(CompactMove.toStandardMove(m, board));
+            board.makeMove(m);
             if (!MoveGenerator.isKingInCheck(board, color)) {
                 moves[lCount++] = m;
             }
@@ -633,6 +850,14 @@ public class JChessV3 implements ChessEngine {
         long bRooks = board.getBitboard(PieceType.ROOK, PieceColor.BLACK);
         long wQueens = board.getBitboard(PieceType.QUEEN, PieceColor.WHITE);
         long bQueens = board.getBitboard(PieceType.QUEEN, PieceColor.BLACK);
+        long wPawns = board.getBitboard(PieceType.PAWN, PieceColor.WHITE);
+        long bPawns = board.getBitboard(PieceType.PAWN, PieceColor.BLACK);
+        int wKingSq = board.getKingSquare(PieceColor.WHITE);
+        int bKingSq = board.getKingSquare(PieceColor.BLACK);
+
+        long occupied = board.getOccupiedBitboard();
+        long wPieces = board.getColorBitboard(PieceColor.WHITE);
+        long bPieces = board.getColorBitboard(PieceColor.BLACK);
 
         totalPieces += Long.bitCount(wKnights) + Long.bitCount(bKnights) +
                        Long.bitCount(wBishops) + Long.bitCount(bBishops) +
@@ -640,79 +865,345 @@ public class JChessV3 implements ChessEngine {
                        Long.bitCount(wQueens)  + Long.bitCount(bQueens);
 
         double factor = Math.max(0.0, Math.min(1.0, (16.0 - totalPieces) / 16.0));
-
-        long pawnsW = board.getBitboard(PieceType.PAWN, PieceColor.WHITE);
-        while (pawnsW != 0) {
-            int sq = Long.numberOfTrailingZeros(pawnsW);
-            score += 100 + PAWNS[sq] * (1 - factor) + PAWNS_END[sq] * factor;
-            pawnsW &= pawnsW - 1;
+        
+        for (int i = 0; i < 8; i++) {
+            whitePawnsOnFile[i] = 0;
+            blackPawnsOnFile[i] = 0;
         }
-        long pawnsB = board.getBitboard(PieceType.PAWN, PieceColor.BLACK);
-        while (pawnsB != 0) {
-            int sq = Long.numberOfTrailingZeros(pawnsB);
-            int mirrored = (7 - (sq / 8)) * 8 + (sq % 8);
+
+        // --- PAWNS ---
+        long tempWPawns = wPawns;
+        while (tempWPawns != 0) {
+            int sq = Long.numberOfTrailingZeros(tempWPawns);
+            int file = sq % 8;
+            int rank = sq / 8;
+            whitePawnsOnFile[file]++;
+            
+            score += 100 + PAWNS[sq] * (1 - factor) + PAWNS_END[sq] * factor;
+            
+            if ((bPawns & PASSED_PAWN_MASK[PieceColor.WHITE.ordinal()][sq]) == 0L) score += 20 + (rank * 10);
+            if ((wPawns & PAWN_SUPPORT_MASK[PieceColor.WHITE.ordinal()][sq]) != 0L) score += 10;
+            if ((wPawns & PASSED_PAWN_MASK[PieceColor.BLACK.ordinal()][sq]) == 0L) score -= 5;
+            
+            tempWPawns &= tempWPawns - 1;
+        }
+
+        long tempBPawns = bPawns;
+        while (tempBPawns != 0) {
+            int sq = Long.numberOfTrailingZeros(tempBPawns);
+            int file = sq % 8;
+            int rank = sq / 8;
+            int mirrored = (7 - rank) * 8 + file;
+            blackPawnsOnFile[file]++;
+            
             score -= 100 + PAWNS[mirrored] * (1 - factor) + PAWNS_END[mirrored] * factor;
-            pawnsB &= pawnsB - 1;
+            
+            if ((wPawns & PASSED_PAWN_MASK[PieceColor.BLACK.ordinal()][sq]) == 0L) score -= 20 + ((7 - rank) * 10);
+            if ((bPawns & PAWN_SUPPORT_MASK[PieceColor.BLACK.ordinal()][sq]) != 0L) score -= 10;
+            if ((bPawns & PASSED_PAWN_MASK[PieceColor.WHITE.ordinal()][sq]) == 0L) score += 5;
+            
+            tempBPawns &= tempBPawns - 1;
         }
         
-        while (wKnights != 0) {
-            int sq = Long.numberOfTrailingZeros(wKnights);
+        // --- KNIGHTS ---
+        long tempWKnights = wKnights;
+        while (tempWKnights != 0) {
+            int sq = Long.numberOfTrailingZeros(tempWKnights);
+            int rank = sq / 8;
             score += 300 + KNIGHTS[sq];
-            wKnights &= wKnights - 1;
+            if (rank >= 3 && rank <= 5 && (wPawns & PAWN_SUPPORT_MASK[PieceColor.WHITE.ordinal()][sq]) != 0L && (bPawns & PASSED_PAWN_MASK[PieceColor.WHITE.ordinal()][sq]) == 0L) score += 15;
+            tempWKnights &= tempWKnights - 1;
         }
-        while (bKnights != 0) {
-            int sq = Long.numberOfTrailingZeros(bKnights);
-            int mirrored = (7 - (sq / 8)) * 8 + (sq % 8);
+        long tempBKnights = bKnights;
+        while (tempBKnights != 0) {
+            int sq = Long.numberOfTrailingZeros(tempBKnights);
+            int rank = sq / 8;
+            int mirrored = (7 - rank) * 8 + (sq % 8);
             score -= 300 + KNIGHTS[mirrored];
-            bKnights &= bKnights - 1;
+            if (rank >= 2 && rank <= 4 && (bPawns & PAWN_SUPPORT_MASK[PieceColor.BLACK.ordinal()][sq]) != 0L && (wPawns & PASSED_PAWN_MASK[PieceColor.BLACK.ordinal()][sq]) == 0L) score -= 15;
+            tempBKnights &= tempBKnights - 1;
         }
 
-        while (wBishops != 0) {
-            int sq = Long.numberOfTrailingZeros(wBishops);
+        // --- BISHOPS (with mobility) ---
+        int whiteBishops = 0;
+        long tempWBishops = wBishops;
+        while (tempWBishops != 0) {
+            whiteBishops++;
+            int sq = Long.numberOfTrailingZeros(tempWBishops);
+            int rank = sq / 8;
             score += 320 + BISHOPS[sq];
-            wBishops &= wBishops - 1;
+            // Mobility: count squares not blocked by own pieces
+            long attacks = BitboardHelper.getBishopAttacks(sq, occupied);
+            int mobility = Long.bitCount(attacks & ~wPieces);
+            score += (mobility - 5) * 4;  // baseline 5 squares, 4cp per extra square
+            if (rank >= 3 && rank <= 5 && (wPawns & PAWN_SUPPORT_MASK[PieceColor.WHITE.ordinal()][sq]) != 0L && (bPawns & PASSED_PAWN_MASK[PieceColor.WHITE.ordinal()][sq]) == 0L) score += 15;
+            tempWBishops &= tempWBishops - 1;
         }
-        while (bBishops != 0) {
-            int sq = Long.numberOfTrailingZeros(bBishops);
-            int mirrored = (7 - (sq / 8)) * 8 + (sq % 8);
+        int blackBishops = 0;
+        long tempBBishops = bBishops;
+        while (tempBBishops != 0) {
+            blackBishops++;
+            int sq = Long.numberOfTrailingZeros(tempBBishops);
+            int rank = sq / 8;
+            int mirrored = (7 - rank) * 8 + (sq % 8);
             score -= 320 + BISHOPS[mirrored];
-            bBishops &= bBishops - 1;
+            long attacks = BitboardHelper.getBishopAttacks(sq, occupied);
+            int mobility = Long.bitCount(attacks & ~bPieces);
+            score -= (mobility - 5) * 4;
+            if (rank >= 2 && rank <= 4 && (bPawns & PAWN_SUPPORT_MASK[PieceColor.BLACK.ordinal()][sq]) != 0L && (wPawns & PASSED_PAWN_MASK[PieceColor.BLACK.ordinal()][sq]) == 0L) score -= 15;
+            tempBBishops &= tempBBishops - 1;
         }
+        if (whiteBishops >= 2) score += 40;
+        if (blackBishops >= 2) score -= 40;
 
-        while (wRooks != 0) {
-            int sq = Long.numberOfTrailingZeros(wRooks);
+        // --- ROOKS (with mobility) ---
+        long tempWRooks = wRooks;
+        while (tempWRooks != 0) {
+            int sq = Long.numberOfTrailingZeros(tempWRooks);
+            int rank = sq / 8;
             score += 500 + ROOKS[sq];
-            wRooks &= wRooks - 1;
+            // Mobility: count squares not blocked by own pieces
+            long attacks = BitboardHelper.getRookAttacks(sq, occupied);
+            int mobility = Long.bitCount(attacks & ~wPieces);
+            score += (mobility - 7) * 3;  // baseline 7 squares, 3cp per extra square
+            if (rank == 6) score += 20;
+            tempWRooks &= tempWRooks - 1;
         }
-        while (bRooks != 0) {
-            int sq = Long.numberOfTrailingZeros(bRooks);
-            int mirrored = (7 - (sq / 8)) * 8 + (sq % 8);
+        long tempBRooks = bRooks;
+        while (tempBRooks != 0) {
+            int sq = Long.numberOfTrailingZeros(tempBRooks);
+            int rank = sq / 8;
+            int mirrored = (7 - rank) * 8 + (sq % 8);
             score -= 500 + ROOKS[mirrored];
-            bRooks &= bRooks - 1;
+            long attacks = BitboardHelper.getRookAttacks(sq, occupied);
+            int mobility = Long.bitCount(attacks & ~bPieces);
+            score -= (mobility - 7) * 3;
+            if (rank == 1) score -= 20;
+            tempBRooks &= tempBRooks - 1;
         }
 
-        while (wQueens != 0) {
-            int sq = Long.numberOfTrailingZeros(wQueens);
+        // --- QUEENS ---
+        long tempWQueens = wQueens;
+        while (tempWQueens != 0) {
+            int sq = Long.numberOfTrailingZeros(tempWQueens);
             score += 900 + QUEENS[sq];
-            wQueens &= wQueens - 1;
+            tempWQueens &= tempWQueens - 1;
         }
-        while (bQueens != 0) {
-            int sq = Long.numberOfTrailingZeros(bQueens);
+        long tempBQueens = bQueens;
+        while (tempBQueens != 0) {
+            int sq = Long.numberOfTrailingZeros(tempBQueens);
             int mirrored = (7 - (sq / 8)) * 8 + (sq % 8);
             score -= 900 + QUEENS[mirrored];
-            bQueens &= bQueens - 1;
+            tempBQueens &= tempBQueens - 1;
         }
 
-        int wKingSq = board.getKingSquare(PieceColor.WHITE);
-        if (wKingSq >= 0) score += KING[wKingSq] * (1 - factor) + KING_END[wKingSq] * factor;
-        
-        int bKingSq = board.getKingSquare(PieceColor.BLACK);
+        // --- KING (PST + King Safety) ---
+        if (wKingSq >= 0) {
+            score += KING[wKingSq] * (1 - factor) + KING_END[wKingSq] * factor;
+            // King Safety (only in middlegame)
+            if (factor < 0.7) {
+                score += evaluateKingSafety(board, PieceColor.WHITE, wKingSq, occupied,
+                        wPawns, bPawns, bKnights, bBishops, bRooks, bQueens, bPieces, factor);
+            }
+        }
         if (bKingSq >= 0) {
             int mirrored = (7 - (bKingSq / 8)) * 8 + (bKingSq % 8);
             score -= KING[mirrored] * (1 - factor) + KING_END[mirrored] * factor;
+            if (factor < 0.7) {
+                score -= evaluateKingSafety(board, PieceColor.BLACK, bKingSq, occupied,
+                        bPawns, wPawns, wKnights, wBishops, wRooks, wQueens, wPieces, factor);
+            }
+        }
+
+        // --- PAWN STRUCTURE & ROOK FILES ---
+        for (int file = 0; file < 8; file++) {
+            int wP = whitePawnsOnFile[file];
+            int bP = blackPawnsOnFile[file];
+            
+            long fileMask = 0x0101010101010101L << file;
+            if ((wRooks & fileMask) != 0L) {
+                if (wP == 0 && bP == 0) score += 25;
+                else if (wP == 0) score += 12;
+            }
+            if ((bRooks & fileMask) != 0L) {
+                if (wP == 0 && bP == 0) score -= 25;
+                else if (bP == 0) score -= 12;
+            }
+            
+            if (wP > 1) score -= 8 * (wP - 1);
+            if (bP > 1) score += 8 * (bP - 1);
+            
+            if (wP > 0) {
+                boolean isolated = true;
+                if (file > 0 && whitePawnsOnFile[file - 1] > 0) isolated = false;
+                if (file < 7 && whitePawnsOnFile[file + 1] > 0) isolated = false;
+                if (isolated) score -= 10 * wP;
+            }
+            if (bP > 0) {
+                boolean isolated = true;
+                if (file > 0 && blackPawnsOnFile[file - 1] > 0) isolated = false;
+                if (file < 7 && blackPawnsOnFile[file + 1] > 0) isolated = false;
+                if (isolated) score += 10 * bP;
+            }
         }
 
         return activeColor == PieceColor.WHITE ? score : -score;
+    }
+
+    /**
+     * King Safety evaluation from the perspective of the defending king.
+     * Returns a POSITIVE score = safer king, NEGATIVE = king in danger.
+     *
+     * @param kingColor  the color of the king being evaluated
+     * @param kingSq     square of the king
+     * @param occupied   full board occupancy
+     * @param ownPawns   friendly pawns
+     * @param enemyPawns enemy pawns
+     * @param enemyKnights/Bishops/Rooks/Queens  enemy piece bitboards
+     * @param enemyPieces all enemy pieces combined
+     * @param factor     endgame factor (0 = all pieces, 1 = endgame)
+     */
+    private double evaluateKingSafety(Board board, PieceColor kingColor, int kingSq, long occupied,
+                                       long ownPawns, long enemyPawns,
+                                       long enemyKnights, long enemyBishops,
+                                       long enemyRooks, long enemyQueens,
+                                       long enemyPieces, double factor) {
+        int safety = 0;
+
+        // --- Pawn Shield ---
+        int kingFile = kingSq % 8;
+        int kingRank = kingSq / 8;
+        boolean isWhite = (kingColor == PieceColor.WHITE);
+        int shieldRank1 = isWhite ? kingRank + 1 : kingRank - 1;
+        int shieldRank2 = isWhite ? kingRank + 2 : kingRank - 2;
+
+        int fMin = Math.max(0, kingFile - 1);
+        int fMax = Math.min(7, kingFile + 1);
+        for (int f = fMin; f <= fMax; f++) {
+            if (shieldRank1 >= 0 && shieldRank1 <= 7) {
+                if ((ownPawns & (1L << (shieldRank1 * 8 + f))) != 0) {
+                    safety += 12;
+                } else if (shieldRank2 >= 0 && shieldRank2 <= 7 &&
+                           (ownPawns & (1L << (shieldRank2 * 8 + f))) != 0) {
+                    safety += 4;
+                } else {
+                    safety -= 14;
+                }
+            }
+        }
+
+        // --- Open/Semi-open files near king ---
+        for (int f = fMin; f <= fMax; f++) {
+            long fileMask = 0x0101010101010101L << f;
+            if ((ownPawns & fileMask) == 0) {
+                safety -= 18;
+                if ((enemyPawns & fileMask) == 0) {
+                    safety -= 12;
+                }
+            }
+        }
+
+        // --- Enemy queen proximity penalty ---
+        if (enemyQueens != 0) {
+            int queenSq = Long.numberOfTrailingZeros(enemyQueens);
+            int queenDist = Math.max(Math.abs(queenSq % 8 - kingFile), Math.abs(queenSq / 8 - kingRank));
+            if (queenDist <= 3) {
+                safety -= (4 - queenDist) * 15;
+            }
+        }
+
+        // --- Enemy piece count near king (cheap: just bitCount on king zone intersection) ---
+        long kingZone = BitboardHelper.getKingAttacks(kingSq);
+        int enemyNearKing = Long.bitCount(kingZone & enemyPieces);
+        safety -= enemyNearKing * 10;
+
+        // Scale by game phase
+        return safety * (1.0 - factor);
+    }
+
+
+
+    private int getPieceValue(PieceType pt) {
+        if (pt == null) return 0;
+        switch(pt) {
+            case PAWN: return 100;
+            case KNIGHT: return 300;
+            case BISHOP: return 320;
+            case ROOK: return 500;
+            case QUEEN: return 900;
+            case KING: return 20000;
+            default: return 0;
+        }
+    }
+
+    public int see(Board board, short move) {
+        int fromSq = CompactMove.getStartSquare(move);
+        int toSq = CompactMove.getTargetSquare(move);
+        Piece targetPiece = board.getPieceAtIndex(toSq);
+        int moveFlag = CompactMove.getMoveFlag(move);
+        
+        int targetValue = 0;
+        if (targetPiece != null) targetValue = getPieceValue(targetPiece.getType());
+        else if (moveFlag == CompactMove.EnPassantCaptureFlag) targetValue = getPieceValue(PieceType.PAWN);
+        
+        int attackerValue = getPieceValue(board.getPieceAtIndex(fromSq).getType());
+        if (moveFlag >= CompactMove.PromoteToQueenFlag) {
+            PieceType promo = CompactMove.getPromotionPieceType(move);
+            if (promo != null) {
+                targetValue += getPieceValue(promo) - getPieceValue(PieceType.PAWN);
+                attackerValue = getPieceValue(promo);
+            }
+        }
+        
+        int[] gain = seeGain;
+        gain[0] = targetValue;
+        
+        long occupied = board.getOccupiedBitboard();
+        occupied ^= (1L << fromSq);
+        if (moveFlag == CompactMove.EnPassantCaptureFlag) {
+            PieceColor c = board.getPieceAtIndex(fromSq).getColor();
+            int epSq = c == PieceColor.WHITE ? toSq - 8 : toSq + 8;
+            occupied ^= (1L << epSq);
+        }
+        
+        PieceColor colorToMove = board.getPieceAtIndex(fromSq).getColor().opposite();
+        int d = 0;
+        
+        while (true) {
+            d++;
+            long attackers = BitboardHelper.getAttackers(board, toSq, occupied);
+            long currentAttackers = attackers & board.getColorBitboard(colorToMove) & occupied;
+            
+            if (currentAttackers == 0) break;
+            
+            int lowestAttackerSq = -1;
+            int lowestAttackerVal = Integer.MAX_VALUE;
+            
+            long tempAttackers = currentAttackers;
+            while (tempAttackers != 0) {
+                int sq = Long.numberOfTrailingZeros(tempAttackers);
+                Piece p = board.getPieceAtIndex(sq);
+                if (p != null) {
+                    int pVal = getPieceValue(p.getType());
+                    if (pVal < lowestAttackerVal) {
+                        lowestAttackerVal = pVal;
+                        lowestAttackerSq = sq;
+                    }
+                }
+                tempAttackers &= tempAttackers - 1;
+            }
+            
+            gain[d] = attackerValue - gain[d - 1];
+            attackerValue = lowestAttackerVal;
+            occupied ^= (1L << lowestAttackerSq);
+            colorToMove = colorToMove.opposite();
+        }
+        
+        while (--d > 0) {
+            gain[d - 1] = -Math.max(-gain[d - 1], gain[d]);
+        }
+        
+        return gain[0];
     }
 
     private static class TT16 {
