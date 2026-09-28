@@ -607,36 +607,35 @@ public class JChessV3 implements ChessEngine {
         if (standPat > alpha) alpha = standPat;
 
         int safePly = Math.min(ply, MAX_PLY - 1);
-        short[] moves = plyQMoves[safePly];
-        int count = generatePseudoLegalMoves(board, color, moves);
-        short[] tacticalMoves = plyTacticals[safePly];
-        int tCount = 0;
-        for (int i=0; i<count; i++) {
-            short m = moves[i];
+        short[] tacticalMoves = plyQMoves[safePly];
+        int tCount = generateCapturesAndPromotions(board, color, tacticalMoves);
+        
+        short[] filteredTacticals = plyTacticals[safePly];
+        int validTCount = 0;
+        
+        for (int i=0; i<tCount; i++) {
+            short m = tacticalMoves[i];
             int moveFlag = CompactMove.getMoveFlag(m);
-            boolean isCapture = board.getPieceCodeAtIndex(CompactMove.getTargetSquare(m)) != Board.EMPTY_SQUARE || moveFlag == CompactMove.EnPassantCaptureFlag;
             boolean isPromotion = moveFlag >= CompactMove.PromoteToQueenFlag;
             
-            if (isCapture || isPromotion) {
-                // SEE pruning for captures
-                if (isCapture && !isPromotion && see(board, m) < 0) {
-                    continue;
-                }
-
-                board.makeMove(m);
-                if (!MoveGenerator.isKingInCheck(board, color)) tacticalMoves[tCount++] = m;
-                board.undoMove();
+            // SEE pruning for captures
+            if (!isPromotion && see(board, m) < 0) {
+                continue;
             }
+
+            board.makeMove(m);
+            if (!MoveGenerator.isKingInCheck(board, color)) filteredTacticals[validTCount++] = m;
+            board.undoMove();
         }
         
-        if (tCount == 0) return standPat;
-        scoreMoves(tacticalMoves, tCount, (short)0, safePly, color, board);
+        if (validTCount == 0) return standPat;
+        scoreMoves(filteredTacticals, validTCount, (short)0, safePly, color, board);
         int[] scores = plyScores[safePly];
 
-        for (int i=0; i<tCount; i++) {
+        for (int i=0; i<validTCount; i++) {
             int bestIdx = i;
             int bestScore = scores[i];
-            for (int j = i + 1; j < tCount; j++) {
+            for (int j = i + 1; j < validTCount; j++) {
                 if (scores[j] > bestScore) {
                     bestScore = scores[j];
                     bestIdx = j;
@@ -645,12 +644,12 @@ public class JChessV3 implements ChessEngine {
             if (bestIdx != i) {
                 scores[bestIdx] = scores[i];
                 scores[i] = bestScore;
-                short tempM = tacticalMoves[i];
-                tacticalMoves[i] = tacticalMoves[bestIdx];
-                tacticalMoves[bestIdx] = tempM;
+                short tempM = filteredTacticals[i];
+                filteredTacticals[i] = filteredTacticals[bestIdx];
+                filteredTacticals[bestIdx] = tempM;
             }
 
-            short move = tacticalMoves[i];
+            short move = filteredTacticals[i];
             board.makeMove(move);
             double score = -quiescence(board, -beta, -alpha, color.opposite(), ply + 1, deadline);
             board.undoMove();
@@ -725,6 +724,102 @@ public class JChessV3 implements ChessEngine {
             board.undoMove();
         }
         return lCount;
+    }
+
+    private int generateCapturesAndPromotions(Board board, PieceColor color, short[] moves) {
+        long enemy = board.getColorBitboard(color.opposite());
+        long occupied = board.getOccupiedBitboard();
+        int count = 0;
+        
+        long pawns = board.getBitboard(PieceType.PAWN, color);
+        int dir = color.getPawnDirection();
+        int promoRank = color.getPromotionRank();
+        Position epTarget = board.getEnPassantTarget();
+        int epSq = (epTarget != null) ? epTarget.getIndex() : -1;
+
+        while (pawns != 0) {
+            int fromSq = Long.numberOfTrailingZeros(pawns);
+            int oneStepSq = fromSq + dir * 8;
+            if (oneStepSq >= 0 && oneStepSq < 64 && (occupied & (1L << oneStepSq)) == 0) {
+                if (oneStepSq / 8 == promoRank) {
+                    moves[count++] = CompactMove.createMove(fromSq, oneStepSq, CompactMove.PromoteToQueenFlag);
+                    moves[count++] = CompactMove.createMove(fromSq, oneStepSq, CompactMove.PromoteToKnightFlag);
+                    moves[count++] = CompactMove.createMove(fromSq, oneStepSq, CompactMove.PromoteToRookFlag);
+                    moves[count++] = CompactMove.createMove(fromSq, oneStepSq, CompactMove.PromoteToBishopFlag);
+                }
+            }
+            long attackDests = BitboardHelper.getPawnAttacks(fromSq, color) & enemy;
+            while (attackDests != 0) {
+                int toSq = Long.numberOfTrailingZeros(attackDests);
+                if (toSq / 8 == promoRank) {
+                    moves[count++] = CompactMove.createMove(fromSq, toSq, CompactMove.PromoteToQueenFlag);
+                    moves[count++] = CompactMove.createMove(fromSq, toSq, CompactMove.PromoteToKnightFlag);
+                    moves[count++] = CompactMove.createMove(fromSq, toSq, CompactMove.PromoteToRookFlag);
+                    moves[count++] = CompactMove.createMove(fromSq, toSq, CompactMove.PromoteToBishopFlag);
+                } else {
+                    moves[count++] = CompactMove.createMove(fromSq, toSq, CompactMove.NoFlag);
+                }
+                attackDests &= attackDests - 1;
+            }
+            if (epSq >= 0 && (BitboardHelper.getPawnAttacks(fromSq, color) & (1L << epSq)) != 0) {
+                moves[count++] = CompactMove.createMove(fromSq, epSq, CompactMove.EnPassantCaptureFlag);
+            }
+            pawns &= pawns - 1;
+        }
+
+        long knights = board.getBitboard(PieceType.KNIGHT, color);
+        while (knights != 0) {
+            int fromSq = Long.numberOfTrailingZeros(knights);
+            long dests = BitboardHelper.getKnightAttacks(fromSq) & enemy;
+            while (dests != 0) {
+                moves[count++] = CompactMove.createMove(fromSq, Long.numberOfTrailingZeros(dests), CompactMove.NoFlag);
+                dests &= dests - 1;
+            }
+            knights &= knights - 1;
+        }
+
+        long bishops = board.getBitboard(PieceType.BISHOP, color);
+        while (bishops != 0) {
+            int fromSq = Long.numberOfTrailingZeros(bishops);
+            long dests = BitboardHelper.getBishopAttacks(fromSq, occupied) & enemy;
+            while (dests != 0) {
+                moves[count++] = CompactMove.createMove(fromSq, Long.numberOfTrailingZeros(dests), CompactMove.NoFlag);
+                dests &= dests - 1;
+            }
+            bishops &= bishops - 1;
+        }
+
+        long rooks = board.getBitboard(PieceType.ROOK, color);
+        while (rooks != 0) {
+            int fromSq = Long.numberOfTrailingZeros(rooks);
+            long dests = BitboardHelper.getRookAttacks(fromSq, occupied) & enemy;
+            while (dests != 0) {
+                moves[count++] = CompactMove.createMove(fromSq, Long.numberOfTrailingZeros(dests), CompactMove.NoFlag);
+                dests &= dests - 1;
+            }
+            rooks &= rooks - 1;
+        }
+
+        long queens = board.getBitboard(PieceType.QUEEN, color);
+        while (queens != 0) {
+            int fromSq = Long.numberOfTrailingZeros(queens);
+            long dests = BitboardHelper.getQueenAttacks(fromSq, occupied) & enemy;
+            while (dests != 0) {
+                moves[count++] = CompactMove.createMove(fromSq, Long.numberOfTrailingZeros(dests), CompactMove.NoFlag);
+                dests &= dests - 1;
+            }
+            queens &= queens - 1;
+        }
+
+        int kingSq = board.getKingSquare(color);
+        if (kingSq >= 0) {
+            long dests = BitboardHelper.getKingAttacks(kingSq) & enemy;
+            while (dests != 0) {
+                moves[count++] = CompactMove.createMove(kingSq, Long.numberOfTrailingZeros(dests), CompactMove.NoFlag);
+                dests &= dests - 1;
+            }
+        }
+        return count;
     }
 
     private int generatePseudoLegalMoves(Board board, PieceColor color, short[] moves) {
